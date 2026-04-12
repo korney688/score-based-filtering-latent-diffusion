@@ -1,0 +1,28 @@
+defaults:
+  - _self_
+
+seed: 42
+
+# train noisy dataset
+dataset_path: "./data/dataset_noisy/dataset_noisy.h5"
+
+# Путь к Диффузионной модели
+DDPM_model: 'DDPM_model'
+DDPM_checkpoint: 'best_model.pth'
+DDPM_model_path: './models/${.DDPM_model}/${.DDPM_checkpoint}'
+
+# параметры фильтрации
+
+# в проекте
+ver: 'v1'
+params: [10,20,3] # для v_2
+
+filter_mode: 'top_k' # ['top_k', 'QQ_spread', 'random']
+save_percent: 10
+
+# Папка, куда сохранится обученная модель
+id_label: ''
+output_dir: "./data/dataset_filtered_${.filter_mode}_${.save_percent}_${.id_label}"
+
+# Dataset params
+in_memory: True

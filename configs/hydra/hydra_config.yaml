@@ -1,0 +1,19 @@
+
+# Создается директория под каждый project.id
+run:
+    dir: ./experiments/${project.id}
+
+sweep:
+    dir: ./experiments_multirun
+    subdir: ${hydra.job.override_dirname}
+    
+output_subdir: configs_dump 
+
+job:
+    chdir: True
+
+job_logging:
+    handlers:
+      file:
+        filename: ${logName}.log
+        encoding: utf-8

@@ -1,0 +1,42 @@
+defaults:
+  - _self_
+
+seed: 42
+
+# train noisy dataset
+dataset_path: "./data/dataset_noisy/dataset_noisy.h5"
+
+# Где храняться обученные параметры
+checkpoint_dir: './models/TDnCNN_model'
+checkpoint_name: ''
+
+# TDnCNN noise
+AWGN_params:
+    snr_db_range: [-20, 0] # min_snr, max_snr
+
+# Dataloader
+batch_size: 32
+num_workers: 4
+in_memory: True
+
+# train loop
+lr: 1e-4
+sheduler_mode: 'plateau'  # ['warmup', 'cos', 'comb', 'plateau', None]
+
+optimizer_load: True
+
+# Параметры для sheduler_mode = 'plateau'
+plateau_params:
+    patience: 5
+    threshold: 0.001
+    factor: 0.5
+
+warmup_params:
+    threshold: 0.1 #10%
+
+    
+grad_clip_val: 100000
+n_epochs: 50
+patience: 10
+
+save_interval: 1
