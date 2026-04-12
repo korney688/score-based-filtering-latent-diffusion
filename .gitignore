@@ -11,3 +11,6 @@ data/
 logs/
 experiments/
 .git
+*.pyc
+*.log
+*.h5
