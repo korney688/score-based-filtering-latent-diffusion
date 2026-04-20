@@ -132,12 +132,13 @@ class _DecoderBlock(nn.Module):
 
     def forward(self, x, y, time_emb):
         x = self.transpose(x)
-        
-        diffD = y.size(2) - x.size(2)
-        diffH = y.size(3) - x.size(3)
-        diffW = y.size(4) - x.size(4)
-        x = F.pad(x, [diffW // 2, diffW - diffW // 2,
-                      diffH // 2, diffH - diffH // 2])
+
+        diffH = y.size(2) - x.size(2)
+        diffW = y.size(3) - x.size(3)
+        x = F.pad(
+            x,
+            [diffW // 2, diffW - diffW // 2,
+             diffH // 2, diffH - diffH // 2])
 
         u = torch.cat([x, y], dim=1)
         u = self.block(u, time_emb)

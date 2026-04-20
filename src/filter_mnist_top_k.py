@@ -10,32 +10,20 @@ from src.DDPM_model import build_DDPM_model
 project_root = Path(__file__).resolve().parents[1]
 model_path = project_root / "experiments" / "exp_001" / "models" / "DDPM_model" / "best_model.pth"
 data_path = project_root / "experiments" / "exp_001" / "data" / "dataset_noisy_var" / "dataset_noisy_var.h5"
-output_dir = project_root / "src" / "filtered_mnist_qq"
-
-quantile_ranges = [
-    (0.80, 1.00),
-    (0.60, 1.00),
-    (0.40, 1.00),
-]
+output_dir = project_root / "src" / "filtered_mnist_topk"
 
 device = "cpu"
 t_values = [10, 30, 50]
+topk_fractions = [0.2, 0.4, 0.6]
 torch.manual_seed(0)
 
 
-def save_filter_info(
-    info_path: Path,
-    selected_count: int,
-    total_count: int,
-    low_q: float,
-    high_q: float,
-) -> None:
+def save_filter_info(info_path: Path, selected_count: int, total_count: int, fraction: float) -> None:
     info_path.write_text(
         "\n".join(
             [
-                "filter_type=qq",
-                f"low_quantile={low_q}",
-                f"high_quantile={high_q}",
+                f"filter_type=top_k",
+                f"fraction={fraction}",
                 f"selected_count={selected_count}",
                 f"total_count={total_count}",
             ]
@@ -93,33 +81,28 @@ print("min:", scores.min())
 print("max:", scores.max())
 print("mean:", scores.mean())
 
-for low_q, high_q in quantile_ranges:
-    low_thr = np.quantile(scores, low_q)
-    high_thr = np.quantile(scores, high_q)
+for fraction in topk_fractions:
+    k = int(fraction * len(scores))
+    idx = np.argsort(scores)[-k:]
+    filtered = data[idx]
 
-    mask = (scores >= low_thr) & (scores <= high_thr)
-    filtered = data[mask]
-    selected_count = int(mask.sum())
-
-    low_label = int(low_q * 100)
-    high_label = int(high_q * 100)
-    output_path = output_dir / f"filtered_dataset_qq_upper_{low_label}_{high_label}.h5"
-    info_path = output_dir / f"filtered_dataset_qq_upper_{low_label}_{high_label}_info.txt"
+    fraction_label = int(fraction * 100)
+    output_path = output_dir / f"filtered_dataset_topk_{fraction_label}pct.h5"
+    info_path = output_dir / f"filtered_dataset_topk_{fraction_label}pct_info.txt"
 
     with h5py.File(output_path, "w") as f:
         f.create_dataset("dataset", data=filtered)
         f.create_dataset("scores", data=scores)
-        f.create_dataset("selected_indices", data=np.where(mask)[0])
+        f.create_dataset("selected_indices", data=idx)
 
     save_filter_info(
         info_path=info_path,
-        selected_count=selected_count,
+        selected_count=len(idx),
         total_count=len(scores),
-        low_q=low_q,
-        high_q=high_q,
+        fraction=fraction,
     )
 
-    print(f"qq {low_label}-{high_label}")
+    print(f"top-k {fraction_label}%")
     print("original:", data.shape)
     print("filtered:", filtered.shape)
     print("saved:", output_path)

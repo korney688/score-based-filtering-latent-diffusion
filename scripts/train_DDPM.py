@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import pandas as pd
 import torch.nn as nn
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, random_split
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR, ReduceLROnPlateau
 from tqdm import tqdm
@@ -25,6 +26,22 @@ from src.tools import Simple_EarlyStop, set_seed
 
 # Инициализация Логгера
 log = logging.getLogger(__name__)
+
+
+def save_loss_plot(train_losses, val_losses, output_path: str) -> None:
+    plt.figure(figsize=(8, 5))
+    epochs = range(1, len(train_losses) + 1)
+
+    plt.plot(epochs, train_losses, label='train loss')
+    plt.plot(epochs, val_losses, label='val loss')
+
+    plt.xlabel('epoch')
+    plt.ylabel('loss')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
 
 
 def get_scheduler(n_epochs, optimizer, lr_start, warmup_params, plateau_params, sheduler_mode='warmup'):
@@ -127,14 +144,14 @@ def run_train_DDPM(cfg: DictConfig):
     try:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         seed = cfg.seed
-        
+
         dataset_path = cfg.dataset_path
         output_dir = cfg.output_dir
-    
+
         batch_size = cfg.batch_size
         num_workers = cfg.num_workers
         in_memory = cfg.get('in_memory', 'False')
-        
+
         lr = cfg.lr
         sheduler_mode = cfg.sheduler_mode
         DDPM_params = cfg.DDPM_params
@@ -145,12 +162,12 @@ def run_train_DDPM(cfg: DictConfig):
         grad_clip_val = cfg.grad_clip_val
 
         save_interval = cfg.get('save_interval', 'last_only')
-        
+
         log.info("Параметры успешно считаны")
     except Exception as e:
         log.error(f'Ошибка при определении параметров -> ОСТАНОВКА. Execution: {e}', exc_info=True)
         raise e
-         
+
     log.info(f"Start train_DDPM")
 
     # ------------------------------------------------------------------
@@ -160,7 +177,7 @@ def run_train_DDPM(cfg: DictConfig):
         msg = f"Output directory is not empty: {output_dir}"
         log.error(msg)
         raise FileExistsError(msg)
-    
+
     # Проверка доступности входных данных
     if not os.path.exists(dataset_path):
         log.error(f"Missing clean data at {dataset_path}")
@@ -182,10 +199,10 @@ def run_train_DDPM(cfg: DictConfig):
         apply_norm=DDPM_params['apply_norm'],
         apply_split=DDPM_params['apply_split'],
         data_mode="image"
-        )
-    
+    )
+
     log.info(f'Dataset shape: {full_dataset.shape}')
-    
+
     # train-val-split
     train_size = int(0.9 * len(full_dataset))
     val_size = len(full_dataset) - train_size
@@ -193,33 +210,37 @@ def run_train_DDPM(cfg: DictConfig):
 
     # Инициализация даталоадеров и тесты
     train_loader = DataLoader(
-            train_dataset, 
-            batch_size=batch_size,
-            shuffle=True, 
-            num_workers=num_workers, 
-            pin_memory=True if device == 'cuda' else False
-        )
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True if device == 'cuda' else False
+    )
 
     val_loader = DataLoader(
-            val_dataset, 
-            batch_size=batch_size,
-            shuffle=True, 
-            num_workers=num_workers, 
-            pin_memory=True if device == 'cuda' else False
-        )
-    
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True if device == 'cuda' else False
+    )
+
     log.info("Датасет подключен.")
-        
+
     # Проверка размерности
     log.info("Batch test:")
     data_batch = next(iter(train_loader))
-    log.info(f"data Shape, dtype: {data_batch.shape}, {data_batch.dtype}") 
-    
+    log.info(f"data Shape, dtype: {data_batch.shape}, {data_batch.dtype}")
+
     # Логирование нормализации по амплитуде и фазе
-    amp_channel = data_batch[:, 0, ...] 
-    phase_channel = data_batch[:, 1, ...]
+    amp_channel = data_batch[:, 0, ...]
+    if data_batch.shape[1] > 1:
+        phase_channel = data_batch[:, 1, ...]
+    else:
+        phase_channel = None
+    if phase_channel is not None:
+        log.info(f"Phase     | Mean: {phase_channel.mean():.4f} | Std: {phase_channel.std():.4f}")
     log.info(f"Amplitude | Mean: {amp_channel.mean():.4f}   | Std: {amp_channel.std():.4f}")
-    log.info(f"Phase     | Mean: {phase_channel.mean():.4f} | Std: {phase_channel.std():.4f}")
 
     # ------------------------------------------------------------------
     # Инициализация модели
@@ -236,17 +257,19 @@ def run_train_DDPM(cfg: DictConfig):
     early_stopping = Simple_EarlyStop(patience=patience, verbose=True)
 
     if sheduler_mode in ['warmup', 'cos', 'comb', 'plateau']:
-        log.info(f"Selected scheduler: {sheduler_mode}") 
+        log.info(f"Selected scheduler: {sheduler_mode}")
         scheduler = get_scheduler(n_epochs, optimizer, lr, warmup_params, plateau_params, sheduler_mode)
     else:
-        log.info(f"Scheduler OFF") 
+        log.info(f"Scheduler OFF")
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
     # Инициализация переменной для отслеживания лучшего лосса
     target_epoch = 0 + n_epochs
     best_loss = float('inf') # начальное значение
     history = [] # для сбора статистики
     last_checkpoint_path = None # для сохранения last_only
+    train_losses = []
+    val_losses = []
 
     # ------------------------------------------------------------------
     # main loop
@@ -267,8 +290,10 @@ def run_train_DDPM(cfg: DictConfig):
 
         # Лог
         msg = (f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.6f} | "
-                   f"Val Loss: {avg_val_loss:.6f} | LR: {current_lr:.2e}")
+               f"Val Loss: {avg_val_loss:.6f} | LR: {current_lr:.2e}")
         log.info(msg)
+        train_losses.append(avg_train_loss)
+        val_losses.append(avg_val_loss)
 
         # Сбор статистики, сохраняем в CSV
         stats = {
@@ -307,7 +332,7 @@ def run_train_DDPM(cfg: DictConfig):
                         log.debug(f"Удален старый чекпоинт: {os.path.basename(last_checkpoint_path)}")
                     except OSError as e:
                         log.warning(f"Не удалось удалить старый чекпоинт: {e}")
-                        
+
             last_checkpoint_path = current_checkpoint_path
 
         else:
@@ -317,12 +342,12 @@ def run_train_DDPM(cfg: DictConfig):
             except ValueError:
                 interval = 5
                 log.info(f"Установлен base save_interval = 5")
-                
+
             if current_epoch % interval == 0 or current_epoch == target_epoch:
                 torch.save(checkpoint, current_checkpoint_path)
                 log.info(f"Сохранен чекпоинт: {os.path.basename(current_checkpoint_path)}")
-        
-        
+
+
         # Сохранение лучшей модели
         if avg_train_loss < best_loss:
             best_loss = avg_train_loss
@@ -335,6 +360,10 @@ def run_train_DDPM(cfg: DictConfig):
         if early_stopping.early_stop:
             log.info("Early stopping triggered. Training stopped.")
             break
+
+    loss_plot_path = os.path.join(output_dir, 'ddpm_loss.png')
+    save_loss_plot(train_losses, val_losses, loss_plot_path)
+    log.info(f"Loss plot saved to: {loss_plot_path}")
 
 
 # Функция дообучения модели
@@ -436,10 +465,14 @@ def run_finetune_DDPM(cfg: DictConfig):
     log.info(f"data Shape, dtype: {data_batch.shape}, {data_batch.dtype}") 
     
     # Логирование нормализации по амплитуде и фазе
-    amp_channel = data_batch[:, 0, ...] 
-    phase_channel = data_batch[:, 1, ...]
+    amp_channel = data_batch[:, 0, ...]
+    if data_batch.shape[1] > 1:
+        phase_channel = data_batch[:, 1, ...]
+    else:
+        phase_channel = None
     log.info(f"Amplitude | Mean: {amp_channel.mean():.4f}   | Std: {amp_channel.std():.4f}")
-    log.info(f"Phase     | Mean: {phase_channel.mean():.4f} | Std: {phase_channel.std():.4f}") 
+    if phase_channel is not None:
+        log.info(f"Phase     | Mean: {phase_channel.mean():.4f} | Std: {phase_channel.std():.4f}")
 
     # ------------------------------------------------------------------
     # Инициализация и загрузка состояния
