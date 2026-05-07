@@ -1,33 +1,16 @@
 defaults:
   - _self_
   - hydra: hydra_config
-  - preprocessing: default
-  - gen_noisy_dataset: default
-  - train_DDPM: default
-  - finetune_DDPM: default
-  - train_TDnCNN: default
-  - finetune_TDnCNN: default
+  - train_latent_DDPM: default
   - filter_dataset: default
-  - epochs_evaluation: default
 
-# Уникальный id -> создается папка в ./experiments
-# Папка становится рабочей (см. hydra_config)
 project:
     id: "exp_001"
 
-# Наименоване log файла
-# Сохраняется внутри рабочей папки
 logName: "main"
 
-# Ключ выполнения скрипта
-task: "preprocessing"
+task: "train_latent_DDPM"
 
 # all tasks:
-    # preprocessing
-    # gen_noisy_dataset
-    # train_DDPM
-    # finetune_DDPM
-    # train_TDnCNN
-    # finetune_TDnCNN
+    # train_latent_DDPM
     # filter_dataset
-    # epochs_evaluation

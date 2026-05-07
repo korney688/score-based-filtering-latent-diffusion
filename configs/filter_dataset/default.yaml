@@ -4,7 +4,7 @@ defaults:
 seed: 42
 
 # train noisy dataset
-dataset_path: "./data/dataset_noisy/dataset_noisy.h5"
+dataset_path: "./data/dataset_noisy_var/dataset_noisy_var.h5"
 
 # Путь к Диффузионной модели
 DDPM_model: 'DDPM_model'

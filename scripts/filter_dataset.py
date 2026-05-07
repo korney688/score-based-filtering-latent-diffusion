@@ -1,4 +1,4 @@
-import torch
+﻿import torch
 import numpy as np
 import pandas as pd
 import torch.nn as nn
@@ -23,7 +23,6 @@ sys.path.append(os.getcwd())
 # Импорт пользовательских функций
 from src.datasets import my_dataset
 from src.tools import set_seed
-from src.plots import plot_snr_histogram
 from src.DDPM_model import build_DDPM_model
 from src.filters import run_DDPM_filter, run_DDPM_filter_v2
 
@@ -182,7 +181,6 @@ def filter_dataset(cfg: DictConfig):
     filtered_loader = DataLoader(filtered_subset, batch_size=batch_size, shuffle=False)
 
     save_path = os.path.join(output_dir, "filtered_dataset.h5")
-    filtered_snr_list = []
     try:
         with h5py.File(save_path, 'w') as hf:
             # 1. Берем первый элемент для определения размерностей и ТИПА ДАННЫХ
@@ -219,9 +217,6 @@ def filter_dataset(cfg: DictConfig):
                 h5_dataset[start_idx:end_idx] = np_data
                 h5_snr[start_idx:end_idx] = np_snr
                 
-                # Сохраняем SNR для гистограммы
-                filtered_snr_list.append(np_snr)
-                
                 start_idx = end_idx
                 
         log.info(f"Успешно сохранено: {save_path}")
@@ -229,33 +224,3 @@ def filter_dataset(cfg: DictConfig):
     except Exception as e:
         log.error(f"Ошибка при сохранении .h5 файла: {e}")
         raise e
-
-    # Объединяем куски SNR в один массив
-    filtered_snr_plot = np.concatenate(filtered_snr_list, axis=0)
-
-    # ------------------------------------------------------------------
-    # Построение гистограммы (с эффективной подвыборкой для full_dataset)
-    log.info("Сбор SNR полного датасета для построения графика (подвыборка 10000 элементов)...")
-    
-    # Для графика достаточно 10 000 точек, чтобы показать идеальное распределение
-    plot_samples = min(10000, len(full_dataset))
-    plot_indices = np.random.choice(len(full_dataset), size=plot_samples, replace=False)
-    
-    full_snr_plot_list = []
-    # Собираем данные в цикле (без батчей, так как это просто извлечение скаляров)
-    for idx in tqdm(plot_indices, desc="Extracting Full SNR"):
-        _, snr_val = full_dataset[idx]
-        # Если это тензор - берем .item(), если numpy/число - оставляем как есть
-        full_snr_plot_list.append(snr_val.item() if isinstance(snr_val, torch.Tensor) else snr_val)
-        
-    full_snr_plot = np.array(full_snr_plot_list)
-
-    filepath = os.path.join(output_dir, 'snr_distribution.png')
-    plot_snr_histogram(data1=full_snr_plot, 
-                       data2=filtered_snr_plot, 
-                       filepath=filepath, 
-                       legend=True, 
-                       label1="full (sampled)", 
-                       label2=f"filtered, {filter_mode}_({save_percent}%)")
-                       
-    log.info(f"Распределение SNR в данных успешно сохранено: {filepath}")

@@ -10,7 +10,7 @@ from src.DDPM_model import build_DDPM_model
 project_root = Path(__file__).resolve().parents[1]
 model_path = project_root / "experiments" / "exp_001" / "models" / "DDPM_model" / "best_model.pth"
 data_path = project_root / "experiments" / "exp_001" / "data" / "dataset_noisy_var" / "dataset_noisy_var.h5"
-output_dir = project_root / "src" / "filtered_mnist_qq"
+output_dir = project_root / "outputs" / "final_results" / "filtering" / "qq"
 
 quantile_ranges = [
     (0.80, 1.00),

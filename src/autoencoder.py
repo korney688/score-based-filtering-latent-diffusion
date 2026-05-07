@@ -1,4 +1,5 @@
-import torch
+# Стандартный автоэнкодер 
+
 from torch import nn
 
 
