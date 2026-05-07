@@ -12,7 +12,7 @@ def main() -> None:
         "mode",
         nargs="?",
         default="compare-encoders",
-        choices=["compare-encoders", "noise-geometry", "latent-consistency", "all"],
+        choices=["compare-encoders", "noise-geometry", "score-validation", "latent-consistency", "all"],
     )
     args = parser.parse_args()
 
@@ -25,9 +25,13 @@ def main() -> None:
 
         encoder_validation.noise_geometry_main()
     if args.mode in {"latent-consistency", "all"}:
-        from src.evaluation import encoder_validation
+        from src.evaluation import encoder_score_validation
 
-        encoder_validation.latent_consistency_main()
+        encoder_score_validation.latent_consistency_main()
+    if args.mode in {"score-validation", "all"}:
+        from src.evaluation import encoder_score_validation
+
+        encoder_score_validation.main()
 
 
 if __name__ == "__main__":

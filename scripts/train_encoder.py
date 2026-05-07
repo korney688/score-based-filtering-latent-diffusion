@@ -17,9 +17,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.variant == "full":
-        from scripts.internal import train_autoencoder_full_mnist
+        from scripts.internal import train_autoencoder_baseline_mnist
 
-        train_autoencoder_full_mnist.main()
+        train_autoencoder_baseline_mnist.main()
     elif args.variant == "noise-consistency":
         from scripts.internal import train_autoencoder_noise_consistency_mnist
 

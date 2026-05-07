@@ -80,7 +80,8 @@ def data_filtering (cfg: DictConfig):
         in_memory=in_memory,
         apply_log=DDPM_params['apply_log'],
         apply_norm=DDPM_params['apply_norm'],
-        apply_split=DDPM_params['apply_split']
+        apply_split=DDPM_params['apply_split'],
+        data_mode="image"
         )
 
     # ------------------------------------------------------------------
@@ -159,7 +160,8 @@ def filter_dataset(cfg: DictConfig):
         in_memory=in_memory,
         apply_log=False,
         apply_norm=False,
-        apply_split=False
+        apply_split=False,
+        data_mode="image"
         )
     
     log.info(f'Dataset shape: {full_dataset.shape}')
