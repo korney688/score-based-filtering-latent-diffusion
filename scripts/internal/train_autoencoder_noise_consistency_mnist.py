@@ -16,14 +16,14 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader, Subset, random_split
 from torchvision import datasets, transforms
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.autoencoder_noise_consistency import NoiseConsistencyAutoencoder
 
 
-OUTPUT_DIR = PROJECT_ROOT / "outputs" / "ae_noise_consistency_mnist_full"
+OUTPUT_DIR = PROJECT_ROOT / "outputs" / "ae_noise_consistency_mnist"
 CHECKPOINT_PATH = OUTPUT_DIR / "autoencoder_checkpoint.pt"
 ENCODER_PATH = OUTPUT_DIR / "E.pt"
 LOSS_PLOT_PATH = OUTPUT_DIR / "loss_curve.png"

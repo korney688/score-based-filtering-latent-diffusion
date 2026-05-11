@@ -11,12 +11,12 @@ def main() -> None:
     parser.add_argument(
         "variant",
         nargs="?",
-        default="full",
-        choices=["full", "noise-consistency", "representation"],
+        default="baseline",
+        choices=["baseline", "noise-consistency", "representation", "vae"],
     )
     args = parser.parse_args()
 
-    if args.variant == "full":
+    if args.variant == "baseline":
         from scripts.internal import train_autoencoder_baseline_mnist
 
         train_autoencoder_baseline_mnist.main()
@@ -28,6 +28,10 @@ def main() -> None:
         from scripts.internal import train_autoencoder_representation_mnist
 
         train_autoencoder_representation_mnist.main()
+    elif args.variant == "vae":
+        from scripts.internal import train_autoencoder_vae_mnist
+
+        train_autoencoder_vae_mnist.main()
 
 
 if __name__ == "__main__":

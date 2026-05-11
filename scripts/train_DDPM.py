@@ -18,13 +18,11 @@ from omegaconf import DictConfig, OmegaConf
 
 sys.path.append(os.getcwd()) 
 
-# РРјРїРѕСЂС‚ РїРѕР»СЊР·РѕРІР°С‚РµР»СЊСЃРєРёС… С„СѓРЅРєС†РёР№
 from src.datasets import my_dataset
 from src.DDPM_model import build_DDPM_model
 from src.tools import Simple_EarlyStop, set_seed
 
 
-# РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ Р›РѕРіРіРµСЂР°
 log = logging.getLogger(__name__)
 
 
@@ -45,7 +43,6 @@ def save_loss_plot(train_losses, val_losses, output_path: str) -> None:
 
 
 def get_scheduler(n_epochs, optimizer, lr_start, warmup_params, plateau_params, sheduler_mode='warmup'):
-    "РћРїСЂРµРґРµР»СЏРµС‚ СЃС‚СЂСѓРєС‚СѓСЂСѓ Scheduler"
 
     if sheduler_mode == 'warmup':
         
@@ -110,7 +107,6 @@ def train_one_epoch(model, loader: DataLoader, optimizer, device, grad_clip_val)
             log.info(f"РћР±СЂР°Р±РѕС‚Р°РЅРѕ {int(log_threshold)}% РґР°РЅРЅС‹С… (Р±Р°С‚С‡ {i_batch + 1}/{total_batches})")
             log_threshold += 20
 
-    # Р’С‹С‡РёСЃР»РµРЅРёРµ СЃСЂРµРґРЅРµРіРѕ Р»РѕСЃСЃР° Р·Р° СЌРїРѕС…Сѓ
     avg_loss = total_loss / len(loader)
         
     return avg_loss
@@ -118,7 +114,6 @@ def train_one_epoch(model, loader: DataLoader, optimizer, device, grad_clip_val)
 
 @torch.no_grad()
 def validate_one_epoch(model, loader: DataLoader, device: str, epoch_desc: str) -> float:
-    """Р¦РёРєР» РІР°Р»РёРґР°С†РёРё. РћРґРЅР° СЌРїРѕС…Р°"""
     model.model.eval()
     total_loss = 0.0
     
@@ -130,17 +125,13 @@ def validate_one_epoch(model, loader: DataLoader, device: str, epoch_desc: str) 
         total_loss += current_loss
         pbar.set_postfix({'val_loss': f'{current_loss:.4f}'})
 
-    # Р’С‹С‡РёСЃР»РµРЅРёРµ СЃСЂРµРґРЅРµРіРѕ Р»РѕСЃСЃР° Р·Р° СЌРїРѕС…Сѓ
     avg_loss  = total_loss / len(loader)
         
     return avg_loss
 
 
-# РћСЃРЅРѕРІРЅР°СЏ С„СѓРЅРєС†РёСЏ
 def run_train_DDPM(cfg: DictConfig):
 
-    # ------------------------------------------------------------------
-    # Р—Р°РіСЂСѓР·РєР° РєРѕРЅС„РёРіСѓСЂР°С†РёРё
     try:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         seed = cfg.seed
@@ -170,27 +161,20 @@ def run_train_DDPM(cfg: DictConfig):
 
     log.info(f"Start train_DDPM")
 
-    # ------------------------------------------------------------------
-    # РџСЂРѕРІРµСЂРєР° РїСѓС‚РµР№
     os.makedirs(output_dir, exist_ok=True)
     if os.path.exists(output_dir) and any(os.scandir(output_dir)):
         msg = f"Output directory is not empty: {output_dir}"
         log.error(msg)
         raise FileExistsError(msg)
 
-    # РџСЂРѕРІРµСЂРєР° РґРѕСЃС‚СѓРїРЅРѕСЃС‚Рё РІС…РѕРґРЅС‹С… РґР°РЅРЅС‹С…
     if not os.path.exists(dataset_path):
         log.error(f"Missing clean data at {dataset_path}")
         raise FileNotFoundError(f"Missing clean data at {dataset_path}")
 
-    # ------------------------------------------------------------------
-    # РќР°СЃС‚СЂРѕР№РєР° СЃРёРґРѕРІ
     set_seed(seed, device)
 
-    # ------------------------------------------------------------------
 
     print("DATASET PATH:", dataset_path)
-    # РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РґР°С‚Р°СЃРµС‚Р°
     full_dataset = my_dataset(
         h5_path=dataset_path,
         data_key="dataset",
@@ -203,12 +187,10 @@ def run_train_DDPM(cfg: DictConfig):
 
     log.info(f'Dataset shape: {full_dataset.shape}')
 
-    # train-val-split
     train_size = int(0.9 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
 
-    # РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РґР°С‚Р°Р»РѕР°РґРµСЂРѕРІ Рё С‚РµСЃС‚С‹
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -227,12 +209,10 @@ def run_train_DDPM(cfg: DictConfig):
 
     log.info("Р”Р°С‚Р°СЃРµС‚ РїРѕРґРєР»СЋС‡РµРЅ.")
 
-    # РџСЂРѕРІРµСЂРєР° СЂР°Р·РјРµСЂРЅРѕСЃС‚Рё
     log.info("Batch test:")
     data_batch = next(iter(train_loader))
     log.info(f"data Shape, dtype: {data_batch.shape}, {data_batch.dtype}")
 
-    # Р›РѕРіРёСЂРѕРІР°РЅРёРµ РЅРѕСЂРјР°Р»РёР·Р°С†РёРё РїРѕ Р°РјРїР»РёС‚СѓРґРµ Рё С„Р°Р·Рµ
     amp_channel = data_batch[:, 0, ...]
     if data_batch.shape[1] > 1:
         phase_channel = data_batch[:, 1, ...]
@@ -242,12 +222,9 @@ def run_train_DDPM(cfg: DictConfig):
         log.info(f"Phase     | Mean: {phase_channel.mean():.4f} | Std: {phase_channel.std():.4f}")
     log.info(f"Amplitude | Mean: {amp_channel.mean():.4f}   | Std: {amp_channel.std():.4f}")
 
-    # ------------------------------------------------------------------
-    # РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РјРѕРґРµР»Рё
     base_dim = DDPM_params.get('base_dim', 16)
     deep = DDPM_params.get('deep', 3)
 
-    # РЎРѕС…СЂР°РЅСЏРµРј РЅР° СЃР»СѓС‡Р°Р№ РѕС‚СЃСѓС‚СЃС‚РІРёСЏ РїР°СЂР°РјРµС‚СЂРѕРІ
     DDPM_params['base_dim'] = base_dim
     DDPM_params['deep'] = deep
 
@@ -262,21 +239,18 @@ def run_train_DDPM(cfg: DictConfig):
     else:
         log.info(f"Scheduler OFF")
 
-        # ------------------------------------------------------------------
-    # РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РїРµСЂРµРјРµРЅРЅРѕР№ РґР»СЏ РѕС‚СЃР»РµР¶РёРІР°РЅРёСЏ Р»СѓС‡С€РµРіРѕ Р»РѕСЃСЃР°
+
     target_epoch = 0 + n_epochs
-    best_loss = float('inf') # РЅР°С‡Р°Р»СЊРЅРѕРµ Р·РЅР°С‡РµРЅРёРµ
-    history = [] # РґР»СЏ СЃР±РѕСЂР° СЃС‚Р°С‚РёСЃС‚РёРєРё
-    last_checkpoint_path = None # РґР»СЏ СЃРѕС…СЂР°РЅРµРЅРёСЏ last_only
+    best_loss = float('inf')
+    history = []
+    last_checkpoint_path = None
     train_losses = []
     val_losses = []
 
-    # ------------------------------------------------------------------
     # main loop
     log.info(f"Start training on {device} for {n_epochs} epochs...")
     for epoch in range(0, target_epoch):
         log.info(f"Epoch {epoch+1}, start:")
-        # РўРµРєСѓС‰РёР№ lr
         current_lr = optimizer.param_groups[0]['lr']
         # Train
         avg_train_loss = train_one_epoch(DDPM_model, train_loader, optimizer, device, grad_clip_val)
@@ -288,14 +262,12 @@ def run_train_DDPM(cfg: DictConfig):
         elif sheduler_mode == 'plateau':
             scheduler.step(avg_val_loss)
 
-        # Р›РѕРі
         msg = (f"Epoch {epoch+1}: Train Loss: {avg_train_loss:.6f} | "
                f"Val Loss: {avg_val_loss:.6f} | LR: {current_lr:.2e}")
         log.info(msg)
         train_losses.append(avg_train_loss)
         val_losses.append(avg_val_loss)
 
-        # РЎР±РѕСЂ СЃС‚Р°С‚РёСЃС‚РёРєРё, СЃРѕС…СЂР°РЅСЏРµРј РІ CSV
         stats = {
             'epoch': epoch + 1,
             'train_loss': avg_train_loss,
@@ -306,7 +278,6 @@ def run_train_DDPM(cfg: DictConfig):
         df = pd.DataFrame(history)
         df.to_csv(os.path.join(output_dir, 'DDPM_metrics.csv'), index=False)
 
-        # РЎРѕС…СЂР°РЅРµРЅРёРµ СЃРѕСЃС‚РѕСЏРЅРёСЏ
         checkpoint = {
             'epoch': epoch + 1,
             'DDPM_params': dict(DDPM_params),
@@ -321,10 +292,8 @@ def run_train_DDPM(cfg: DictConfig):
         current_checkpoint_path = os.path.join(output_dir, f"epoch_{current_epoch:03d}.pth")
 
         if save_interval == 'last_only':
-            # РЎРѕС…СЂР°РЅРµРЅРёРµ С‚РµРєСѓС‰РµРіРѕ С‡РµРєРїРѕРёРЅС‚Р° (РїСЂРѕРґРѕР»Р¶РµРЅРёРµ РЅСѓРјРµСЂР°С†РёРё)
             torch.save(checkpoint, current_checkpoint_path)
             log.info(f"РЎРѕС…СЂР°РЅРµРЅ С‡РµРєРїРѕРёРЅС‚: {os.path.basename(current_checkpoint_path)}")
-            # РЈРґР°Р»РµРЅРёРµ РїСЂРµРґС‹РґСѓС‰РµРіРѕ С‡РµРєРїРѕРёРЅС‚Р° (РѕСЃС‚Р°РІР»СЏРµРј С‚РѕР»СЊРєРѕ РїРѕСЃР»РµРґРЅРёР№)
             if last_checkpoint_path is not None and last_checkpoint_path != current_checkpoint_path:
                 if os.path.exists(last_checkpoint_path):
                     try:
@@ -348,14 +317,12 @@ def run_train_DDPM(cfg: DictConfig):
                 log.info(f"РЎРѕС…СЂР°РЅРµРЅ С‡РµРєРїРѕРёРЅС‚: {os.path.basename(current_checkpoint_path)}")
 
 
-        # РЎРѕС…СЂР°РЅРµРЅРёРµ Р»СѓС‡С€РµР№ РјРѕРґРµР»Рё
         if avg_train_loss < best_loss:
             best_loss = avg_train_loss
             best_model_path = os.path.join(output_dir, "best_model.pth")
             torch.save(checkpoint, best_model_path)
             log.info(f"--> Saved New Best Model! Loss improved to {best_loss:.6f}")
 
-        # РџСЂРѕРІРµСЂРєР° Early_stopping
         early_stopping(avg_val_loss)
         if early_stopping.early_stop:
             log.info("Early stopping triggered. Training stopped.")
@@ -366,4 +333,3 @@ def run_train_DDPM(cfg: DictConfig):
     log.info(f"Loss plot saved to: {loss_plot_path}")
 
 
-# Р¤СѓРЅРєС†РёСЏ РґРѕРѕР±СѓС‡РµРЅРёСЏ РјРѕРґРµР»Рё

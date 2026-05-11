@@ -6,6 +6,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+
+def run_with_forwarded_args(func, forwarded_args: list[str]) -> None:
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [original_argv[0], *forwarded_args]
+        func()
+    finally:
+        sys.argv = original_argv
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -14,24 +24,24 @@ def main() -> None:
         default="compare-encoders",
         choices=["compare-encoders", "noise-geometry", "score-validation", "latent-consistency", "all"],
     )
-    args = parser.parse_args()
+    args, forwarded_args = parser.parse_known_args()
 
     if args.mode in {"compare-encoders", "all"}:
         from src.evaluation import encoder_validation
 
-        encoder_validation.main()
+        run_with_forwarded_args(encoder_validation.main, forwarded_args)
     if args.mode in {"noise-geometry", "all"}:
         from src.evaluation import encoder_validation
 
-        encoder_validation.noise_geometry_main()
+        run_with_forwarded_args(encoder_validation.noise_geometry_main, forwarded_args)
     if args.mode in {"latent-consistency", "all"}:
         from src.evaluation import encoder_score_validation
 
-        encoder_score_validation.latent_consistency_main()
+        run_with_forwarded_args(encoder_score_validation.latent_consistency_main, forwarded_args)
     if args.mode in {"score-validation", "all"}:
         from src.evaluation import encoder_score_validation
 
-        encoder_score_validation.main()
+        run_with_forwarded_args(encoder_score_validation.main, forwarded_args)
 
 
 if __name__ == "__main__":

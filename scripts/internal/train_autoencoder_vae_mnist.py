@@ -1,11 +1,7 @@
-# Обучение стандартного автоэнкодера на MNIST 60 000
-
 from __future__ import annotations
 
 import json
-import logging
 import sys
-import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -20,16 +16,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from src.autoencoder import SimpleAE
+from src.autoencoder_vae import VariationalAutoencoder
 
 
-log = logging.getLogger(__name__)
-
-# Fixed training constants for this protocol-specific baseline AE run
-# They are kept in the script to preserve the original experiment behavior
-OUTPUT_DIR = PROJECT_ROOT / "outputs" / "ae_baseline_mnist"
+OUTPUT_DIR = PROJECT_ROOT / "outputs" / "ae_vae_mnist"
 CHECKPOINT_PATH = OUTPUT_DIR / "autoencoder_checkpoint.pt"
-ENCODER_PATH = OUTPUT_DIR / "E.pt"   # Only encoder checkpoints
+ENCODER_PATH = OUTPUT_DIR / "E.pt"
 LOSS_PLOT_PATH = OUTPUT_DIR / "loss_curve.png"
 METRICS_PATH = OUTPUT_DIR / "metrics.json"
 RECON_GRID_PATH = OUTPUT_DIR / "reconstruction_grid.png"
@@ -39,22 +31,15 @@ BATCH_SIZE = 128
 LR = 1e-3
 TRAIN_VAL_SPLIT = 0.9
 SEED = 42
-
-
-def configure_logging() -> None:
-    if not logging.getLogger().handlers:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        )
+LATENT_DIM = 16
+BETA = 1e-3
 
 
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-# Convert normalized image tensors from [-1, 1] back to [0, 1]
-# for plotting and saving visual reconstructions.
+
 def denormalize_to_unit_interval(x: torch.Tensor) -> torch.Tensor:
     return ((x + 1.0) / 2.0).clamp(0.0, 1.0)
 
@@ -82,14 +67,16 @@ def build_dataloaders() -> tuple[DataLoader, DataLoader]:
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
     return train_loader, val_loader
 
-# Run the autoencoder on a batch and compute reconstruction MSE
-def reconstruction_loss(model: nn.Module, batch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    reconstruction_01 = model(batch)
-    reconstruction = reconstruction_01 * 2.0 - 1.0 # The model output is converted from [0, 1] to [-1, 1]
-    loss = nn.MSELoss()(reconstruction, batch)
-    return loss, reconstruction
 
-# Visualize
+def vae_loss(model: VariationalAutoencoder, batch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    reconstruction_01, mu, logvar = model(batch)
+    reconstruction = reconstruction_01 * 2.0 - 1.0
+    reconstruction_loss = nn.MSELoss()(reconstruction, batch)
+    kl_divergence = -0.5 * torch.mean(1.0 + logvar - mu.pow(2) - logvar.exp())
+    loss = reconstruction_loss + BETA * kl_divergence
+    return loss, reconstruction_loss, kl_divergence, reconstruction
+
+
 def save_loss_curve(train_losses: list[float], val_losses: list[float], output_path: Path) -> None:
     plt.figure(figsize=(8, 5))
     epochs = range(1, len(train_losses) + 1)
@@ -97,7 +84,7 @@ def save_loss_curve(train_losses: list[float], val_losses: list[float], output_p
     plt.plot(epochs, val_losses, label="val_loss")
     plt.xlabel("epoch")
     plt.ylabel("loss")
-    plt.title("Autoencoder Reconstruction Loss")
+    plt.title("VAE Loss")
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
@@ -125,105 +112,78 @@ def save_reconstruction_grid(original: torch.Tensor, reconstructed: torch.Tensor
 
 
 def main() -> None:
-    configure_logging()
-    start_time = time.time()
-
-    log.info("=" * 80)
-    log.info("Starting baseline autoencoder training")
-    log.info("=" * 80)
-    log.info(f"Project root: {PROJECT_ROOT}")
-    log.info(f"Output directory: {OUTPUT_DIR}")
-    log.info(
-        "Training config: "
-        f"epochs={EPOCHS}, batch_size={BATCH_SIZE}, lr={LR}, "
-        f"train_val_split={TRAIN_VAL_SPLIT}, seed={SEED}"
-    )
-
     set_seed(SEED)
-    log.info(f"Random seed fixed: {SEED}")
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    log.info("Output directory is ready.")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    log.info(f"Selected device: {device}")
-
-    log.info("Loading MNIST train split and building dataloaders...")
     train_loader, val_loader = build_dataloaders()
-    log.info(
-        "Dataloaders are ready: "
-        f"train_items={len(train_loader.dataset)}, val_items={len(val_loader.dataset)}, "
-        f"train_batches={len(train_loader)}, val_batches={len(val_loader)}"
-    )
 
-    model = SimpleAE().to(device)
+    model = VariationalAutoencoder(latent_dim=LATENT_DIM).to(device)
     optimizer = Adam(model.parameters(), lr=LR)
-    log.info("Baseline autoencoder and optimizer initialized.")
 
     train_losses: list[float] = []
     val_losses: list[float] = []
+    train_reconstruction_losses: list[float] = []
+    val_reconstruction_losses: list[float] = []
+    train_kl_losses: list[float] = []
+    val_kl_losses: list[float] = []
     best_val_loss = float("inf")
     last_example_batch = None
     last_example_reconstruction = None
 
     for epoch in range(EPOCHS):
-        epoch_start_time = time.time()
-        log.info("-" * 80)
-        log.info(f"Epoch {epoch + 1}/{EPOCHS} started")
-
-        # Run one training epoch
         model.train()
-        train_total = 0.0  # summ by loss
-        train_items = 0 # summ by numbers processed image
-        total_train_batches = len(train_loader) # for progress evaluate
-        train_log_threshold = 20 # for writing log
+        train_total = 0.0
+        train_recon_total = 0.0
+        train_kl_total = 0.0
+        train_items = 0
 
-        for batch_idx, (batch, _) in enumerate(train_loader):  # MIST labels are ignored because autoencoder learns image reconstruction
+        for batch, _ in train_loader:
             batch = batch.to(device)
-            loss, reconstruction = reconstruction_loss(model, batch)
+            loss, reconstruction_loss, kl_divergence, reconstruction = vae_loss(model, batch)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             batch_size = batch.shape[0]
-            # Accumulate weighted loss to compute epoch-level average
             train_total += float(loss.item()) * batch_size
+            train_recon_total += float(reconstruction_loss.item()) * batch_size
+            train_kl_total += float(kl_divergence.item()) * batch_size
             train_items += batch_size
 
-            # Keep examples from the latest batch for the final reconstruction grid
             last_example_batch = batch.detach().cpu()
             last_example_reconstruction = reconstruction.detach().cpu()
 
-            progress_percent = (batch_idx + 1) / total_train_batches * 100
-            if progress_percent >= train_log_threshold:
-                log.info(
-                    f"Training progress: {train_log_threshold}% "
-                    f"({batch_idx + 1}/{total_train_batches} batches)"
-                )
-                train_log_threshold += 20
-
-        # Store average training loss for this epoch
         avg_train_loss = train_total / train_items
+        avg_train_recon = train_recon_total / train_items
+        avg_train_kl = train_kl_total / train_items
         train_losses.append(avg_train_loss)
+        train_reconstruction_losses.append(avg_train_recon)
+        train_kl_losses.append(avg_train_kl)
 
-        # Evaluate reconstruction quality on validation data without gradient updates
         model.eval()
         val_total = 0.0
+        val_recon_total = 0.0
+        val_kl_total = 0.0
         val_items = 0
-        log.info("Validation started.")
         with torch.no_grad():
             for batch, _ in val_loader:
                 batch = batch.to(device)
-                loss, _ = reconstruction_loss(model, batch)
+                loss, reconstruction_loss, kl_divergence, _ = vae_loss(model, batch)
                 batch_size = batch.shape[0]
                 val_total += float(loss.item()) * batch_size
+                val_recon_total += float(reconstruction_loss.item()) * batch_size
+                val_kl_total += float(kl_divergence.item()) * batch_size
                 val_items += batch_size
 
         avg_val_loss = val_total / val_items
+        avg_val_recon = val_recon_total / val_items
+        avg_val_kl = val_kl_total / val_items
         val_losses.append(avg_val_loss)
+        val_reconstruction_losses.append(avg_val_recon)
+        val_kl_losses.append(avg_val_kl)
 
-        # Save the best model according to validation reconstruction loss
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             torch.save(
@@ -233,34 +193,39 @@ def main() -> None:
                     "optimizer_state_dict": optimizer.state_dict(),
                     "train_losses": train_losses,
                     "val_losses": val_losses,
+                    "train_reconstruction_losses": train_reconstruction_losses,
+                    "val_reconstruction_losses": val_reconstruction_losses,
+                    "train_kl_losses": train_kl_losses,
+                    "val_kl_losses": val_kl_losses,
+                    "beta": BETA,
                     "lr": LR,
                     "batch_size": BATCH_SIZE,
+                    "latent_dim": LATENT_DIM,
                 },
                 CHECKPOINT_PATH,
             )
-            torch.save(model.encoder.state_dict(), ENCODER_PATH)
-            log.info(f"Saved new best checkpoint: {CHECKPOINT_PATH}")
-            log.info(f"Saved encoder state: {ENCODER_PATH}")
+            torch.save(
+                {
+                    "encoder": model.encoder.state_dict(),
+                    "fc_mu": model.fc_mu.state_dict(),
+                    "fc_logvar": model.fc_logvar.state_dict(),
+                },
+                ENCODER_PATH,
+            )
 
-        epoch_time = time.time() - epoch_start_time
-        log.info(
-            f"Epoch {epoch + 1}/{EPOCHS} completed | "
-            f"train_loss={avg_train_loss:.6f} | "
-            f"val_loss={avg_val_loss:.6f} | "
-            f"best_val_loss={best_val_loss:.6f} | "
-            f"time_min={epoch_time / 60:.2f}"
-        )
         print(
             f"epoch={epoch + 1}/{EPOCHS} "
             f"train_loss={avg_train_loss:.6f} "
-            f"val_loss={avg_val_loss:.6f}"
+            f"train_recon={avg_train_recon:.6f} "
+            f"train_kl={avg_train_kl:.6f} "
+            f"val_loss={avg_val_loss:.6f} "
+            f"val_recon={avg_val_recon:.6f} "
+            f"val_kl={avg_val_kl:.6f}"
         )
 
     save_loss_curve(train_losses, val_losses, LOSS_PLOT_PATH)
-    log.info(f"Saved loss curve: {LOSS_PLOT_PATH}")
     if last_example_batch is not None and last_example_reconstruction is not None:
         save_reconstruction_grid(last_example_batch, last_example_reconstruction, RECON_GRID_PATH)
-        log.info(f"Saved reconstruction grid: {RECON_GRID_PATH}")
 
     METRICS_PATH.write_text(
         json.dumps(
@@ -268,8 +233,14 @@ def main() -> None:
                 "epochs": EPOCHS,
                 "batch_size": BATCH_SIZE,
                 "lr": LR,
+                "latent_dim": LATENT_DIM,
+                "beta": BETA,
                 "train_losses": train_losses,
                 "val_losses": val_losses,
+                "train_reconstruction_losses": train_reconstruction_losses,
+                "val_reconstruction_losses": val_reconstruction_losses,
+                "train_kl_losses": train_kl_losses,
+                "val_kl_losses": val_kl_losses,
                 "best_val_loss": best_val_loss,
                 "final_train_loss": train_losses[-1],
                 "final_val_loss": val_losses[-1],
@@ -278,18 +249,6 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
-    log.info(f"Saved metrics: {METRICS_PATH}")
-
-    total_time = time.time() - start_time
-    log.info("=" * 80)
-    log.info(
-        "Baseline autoencoder training completed | "
-        f"final_train_loss={train_losses[-1]:.6f} | "
-        f"final_val_loss={val_losses[-1]:.6f} | "
-        f"best_val_loss={best_val_loss:.6f} | "
-        f"total_time_min={total_time / 60:.2f}"
-    )
-    log.info("=" * 80)
 
     print(f"checkpoint_path={CHECKPOINT_PATH}")
     print(f"encoder_path={ENCODER_PATH}")

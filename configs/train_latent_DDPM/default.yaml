@@ -1,0 +1,45 @@
+defaults:
+  - _self_
+
+seed: 42
+
+# train noisy dataset
+# dataset_path: "./data/dataset_noisy/dataset_noisy.h5"
+dataset_path: "./data/dataset_clean_mnist/dataset_clean_mnist.h5"
+
+# Папка, куда сохранится обученная модель
+id_label: ''
+output_dir: "./models/DDPM_model${.id_label}"
+
+# Dataloader
+batch_size: 32
+num_workers: 4
+in_memory: True
+
+# Параметры DDPM
+DDPM_params:
+    base_dim: 16 
+    deep: 3 # Максимум 3
+    apply_log: True
+    apply_norm: True
+    apply_split: True
+
+# train loop
+lr: 1e-4
+n_epochs: 30
+patience: 10
+grad_clip_val: 100000
+sheduler_mode: '-'  # ['warmup', 'cos', 'comb', 'plateau', None]
+
+
+
+# Параметры для sheduler_mode = 'plateau'
+plateau_params:
+    patience: 5
+    threshold: 0.001
+    factor: 0.8
+warmup_params:
+    threshold: 0.1 #10%
+
+
+save_interval: 'last_only'

@@ -9,9 +9,13 @@ venv/
 .venv/
 env/
 .env
-data/
+data/*
+!data/README.md
 logs/
-experiments/
+experiments/*
+!experiments/README.md
+outputs/*
+!outputs/README.md
 .git
 *.pyc
 *.log
@@ -20,6 +24,7 @@ experiments/
 best_vs_worst.png
 score_hist.png
 score_scatter.png
-models/
+models/*
+!models/README.md
 src/filtered_mnist_topk/
 src/filtered_mnist_qq/
