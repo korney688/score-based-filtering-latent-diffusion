@@ -14,6 +14,7 @@ class RepresentationEncoder(nn.Module):
     ) -> None:
         super().__init__()
 
+        # Use pretrained ResNet18 features when torchvision weights are available
         weights = None
         if pretrained:
             try:
@@ -27,15 +28,18 @@ class RepresentationEncoder(nn.Module):
             backbone = models.resnet18(weights=None)
             weights = None
 
+        # Remove ResNet's classification head and keep only feature extraction
         self.backbone_pretrained = weights is not None
         feature_dim = backbone.fc.in_features
-        backbone.fc = nn.Identity()
-        self.backbone = backbone
+        backbone.fc = nn.Identity() # only feature vector
+        self.backbone = backbone # safe as backbone
 
+        # Optionally freeze the representation backbone and train only the projector/decoder first
         if freeze_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
 
+        # Map high-dimensional ResNet features into the compact latent space used by the pipeline
         self.projector = nn.Sequential(
             nn.Linear(feature_dim, 128),
             nn.ReLU(),
@@ -43,6 +47,7 @@ class RepresentationEncoder(nn.Module):
         )
 
     def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
+        # Convert MNIST tensors from [-1, 1] grayscale to ImageNet-normalized RGB
         x = ((x + 1.0) / 2.0).clamp(0.0, 1.0)
         if x.shape[1] == 1:
             x = x.repeat(1, 3, 1, 1)
@@ -68,6 +73,7 @@ class RepresentationAutoencoder(nn.Module):
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
         )
+        # Decode the compact latent vector back into a 28x28 grayscale reconstruction
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 16 * 7 * 7),
             nn.ReLU(),
@@ -85,5 +91,6 @@ class RepresentationAutoencoder(nn.Module):
         return self.decoder(z)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # autoencoder pass: image -> representation latent vector -> reconstruction
         z = self.encode(x)
         return self.decode(z)

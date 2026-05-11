@@ -8,6 +8,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 def run_with_forwarded_args(func, forwarded_args: list[str]) -> None:
+    # Temporarily forward CLI arguments to the selected evaluation module
     original_argv = sys.argv[:]
     try:
         sys.argv = [original_argv[0], *forwarded_args]
@@ -26,6 +27,7 @@ def main() -> None:
     )
     args, forwarded_args = parser.parse_known_args()
 
+    # Stage 1: compare reconstruction quality and latent noise geometry across encoders
     if args.mode in {"compare-encoders", "all"}:
         from src.evaluation import encoder_validation
 
@@ -34,6 +36,8 @@ def main() -> None:
         from src.evaluation import encoder_validation
 
         run_with_forwarded_args(encoder_validation.noise_geometry_main, forwarded_args)
+
+    # Stage 2: validate whether latent DDPM score is meaningful for selected encoders
     if args.mode in {"latent-consistency", "all"}:
         from src.evaluation import encoder_score_validation
 

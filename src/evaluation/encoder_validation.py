@@ -27,6 +27,8 @@ from src.autoencoder_vae import VariationalAutoencoder
 ENCODER_VALIDATION_ROOT = PROJECT_ROOT / "experiments" / "exp_002_encoder_validation"
 GEOMETRY_OUTPUT_DIR = ENCODER_VALIDATION_ROOT / "geometry"
 RECONSTRUCTION_OUTPUT_DIR = ENCODER_VALIDATION_ROOT / "reconstruction"
+
+# Shared validation settings for all encoder candidates
 BATCH_SIZE = 128
 NUM_SAMPLES = 5000
 SEED = 42
@@ -35,6 +37,7 @@ SIGMA_MAX = 0.8
 NUM_BINS = 10
 
 
+# Every encoder candidate is described by its model kind and saved training artifacts
 ENCODER_SPECS = {
     "baseline": {
         "kind": "baseline",
@@ -75,6 +78,7 @@ def set_seed(seed: int) -> None:
 
 
 def _extract_state_dict(maybe_state: Any) -> dict[str, torch.Tensor]:
+    # Support both raw state_dict files and checkpoint dictionaries
     if isinstance(maybe_state, dict) and "state_dict" in maybe_state and isinstance(maybe_state["state_dict"], dict):
         return maybe_state["state_dict"]
     if isinstance(maybe_state, dict):
@@ -83,6 +87,7 @@ def _extract_state_dict(maybe_state: Any) -> dict[str, torch.Tensor]:
 
 
 def load_autoencoder(kind: str, checkpoint_path: Path, encoder_path: Path, device: torch.device) -> torch.nn.Module:
+    # Recreate the same model class that was used during training
     if kind == "baseline":
         model = SimpleAE().to(device)
     elif kind == "representation":
@@ -94,6 +99,7 @@ def load_autoencoder(kind: str, checkpoint_path: Path, encoder_path: Path, devic
     else:
         raise ValueError(f"Unknown encoder kind: {kind}")
 
+    # Prefer the full autoencoder checkpoint when available because reconstruction validation needs the decoder
     if checkpoint_path.exists():
         checkpoint = torch.load(checkpoint_path, map_location=device)
         checkpoint_dict = checkpoint if isinstance(checkpoint, dict) else {}
@@ -102,6 +108,7 @@ def load_autoencoder(kind: str, checkpoint_path: Path, encoder_path: Path, devic
         else:
             model.load_state_dict(_extract_state_dict(checkpoint))
     elif encoder_path.exists():
+        # Fallback for geometry-only validation when only the encoder side was saved
         encoder_state = _extract_state_dict(torch.load(encoder_path, map_location=device))
         if kind == "vae" and {"encoder", "fc_mu", "fc_logvar"}.issubset(encoder_state):
             model.encoder.load_state_dict(encoder_state["encoder"])
@@ -112,6 +119,7 @@ def load_autoencoder(kind: str, checkpoint_path: Path, encoder_path: Path, devic
     else:
         raise FileNotFoundError(f"Missing encoder checkpoint: {checkpoint_path} or {encoder_path}")
 
+    # Validation must be deterministic and should not update model weights
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
@@ -119,6 +127,7 @@ def load_autoencoder(kind: str, checkpoint_path: Path, encoder_path: Path, devic
 
 
 def encode_deterministic(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    # VAE returns mu, logvar, use mu as the deterministic latent representation
     encoded = model.encode(x)
     if isinstance(encoded, tuple):
         return encoded[0]
@@ -126,6 +135,7 @@ def encode_deterministic(model: torch.nn.Module, x: torch.Tensor) -> torch.Tenso
 
 
 def reconstruct_deterministic(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    # VAE forward returns reconstruction, mu, logvar, while regular AEs return reconstruction only
     output = model(x)
     if isinstance(output, tuple):
         return output[0]
@@ -133,6 +143,7 @@ def reconstruct_deterministic(model: torch.nn.Module, x: torch.Tensor) -> torch.
 
 
 def build_loader(num_samples: int, batch_size: int) -> DataLoader:
+    # Use the MNIST test split for encoder validation
     transform = transforms.Compose(
         [
             transforms.ToTensor(),
@@ -151,6 +162,7 @@ def build_loader(num_samples: int, batch_size: int) -> DataLoader:
 
 
 def flatten_latent(z: torch.Tensor) -> torch.Tensor:
+    # Geometry metrics require one latent vector per image
     if z.ndim == 2:
         return z
     if z.ndim >= 3:
@@ -159,6 +171,7 @@ def flatten_latent(z: torch.Tensor) -> torch.Tensor:
 
 
 def sample_sigma(batch_size: int, device: torch.device) -> torch.Tensor:
+    # Sample one image-space Gaussian noise level per validation item
     return torch.empty(batch_size, 1, 1, 1, device=device).uniform_(SIGMA_MIN, SIGMA_MAX)
 
 
@@ -228,6 +241,7 @@ def evaluate_reconstruction(
     output_dir: Path,
     device: torch.device,
 ) -> dict[str, Any]:
+    # Measure how well each full autoencoder reconstructs clean validation images
     model_dir = output_dir / name
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -237,6 +251,7 @@ def evaluate_reconstruction(
 
     for x, _ in loader:
         x = x.to(device)
+        # Convert decoder output from [0, 1] back to the normalized [-1, 1] image scale
         reconstruction = reconstruct_deterministic(model, x) * 2.0 - 1.0
         mse_per_item = (reconstruction - x).flatten(start_dim=1).pow(2).mean(dim=1)
         total_mse += float(mse_per_item.sum().item())
@@ -267,6 +282,7 @@ def evaluate_geometry(
     output_dir: Path,
     device: torch.device,
 ) -> dict[str, Any]:
+    # Measure how image-space noise is transformed by the encoder into latent-space perturbations
     model_dir = output_dir / name
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -276,14 +292,17 @@ def evaluate_geometry(
 
     for x, _ in loader:
         x = x.to(device)
+        # Add controlled Gaussian noise with a random sigma for each image
         sigma = sample_sigma(x.shape[0], device)
         epsilon = torch.randn_like(x)
         x_noisy = x + sigma * epsilon
 
+        # Compare latent vectors of clean and noisy versions of the same image
         z_clean = flatten_latent(encode_deterministic(encoder, x))
         z_noisy = flatten_latent(encode_deterministic(encoder, x_noisy))
         delta_z = z_noisy - z_clean
 
+        # score_latent is the squared latent displacement caused by image-space noise
         score_latent = delta_z.pow(2).sum(dim=1)
         delta_z_norm = delta_z / sigma.view(-1, 1)
 
@@ -296,10 +315,12 @@ def evaluate_geometry(
     score_latent_np = np.concatenate(score_latent_values, axis=0)
     delta_z_norm_np = np.concatenate(delta_z_norm_values, axis=0)
 
+    # Correlations show whether larger image noise produces larger latent displacement
     pearson_score_sigma2 = float(pd.Series(score_latent_np).corr(pd.Series(sigma_sq_np), method="pearson"))
     pearson_score_sigma = float(pd.Series(score_latent_np).corr(pd.Series(sigma_np), method="pearson"))
     spearman_score_sigma = float(pd.Series(score_latent_np).corr(pd.Series(sigma_np), method="spearman"))
 
+    # Binned curve makes monotonicity easier to inspect visually
     bin_edges = np.linspace(SIGMA_MIN, SIGMA_MAX, NUM_BINS + 1)
     bin_indices = np.clip(np.digitize(sigma_np, bin_edges) - 1, 0, NUM_BINS - 1)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
@@ -315,6 +336,7 @@ def evaluate_geometry(
     delta_z_norm_var = delta_z_norm_np.var(axis=0)
     avg_variance = float(delta_z_norm_var.mean())
 
+    # Covariance spectrum describes anisotropy of noise in latent space
     cov = np.cov(delta_z_norm_np, rowvar=False)
     eigvals = np.linalg.eigvalsh(cov)
     min_eig = float(np.min(eigvals))
@@ -331,6 +353,7 @@ def evaluate_geometry(
     scatter_path = model_dir / "sigma_vs_score_latent_scatter.png"
     binned_path = model_dir / "sigma_bins_mean_score_latent.png"
     df.to_csv(csv_path, index=False)
+    # Save raw data and plots for later manual inspection
     save_geometry_scatter(df, scatter_path)
     save_binned_curve(bin_centers, bin_means, binned_path)
 
@@ -364,6 +387,7 @@ def run_reconstruction_validation(
     batch_size: int = BATCH_SIZE,
     device_arg: str | None = None,
 ) -> None:
+    # Run reconstruction validation for every trained encoder candidate
     set_seed(SEED)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(device_arg or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -372,6 +396,7 @@ def run_reconstruction_validation(
     rows = []
     for name, spec in ENCODER_SPECS.items():
         print(f"reconstruction_encoder={name}")
+        # Load trained model artifacts and evaluate one encoder candidate
         model = load_autoencoder(
             kind=spec["kind"],
             checkpoint_path=spec["checkpoint_path"],
@@ -393,6 +418,7 @@ def noise_geometry_main(
     batch_size: int = BATCH_SIZE,
     device_arg: str | None = None,
 ) -> None:
+    # Run latent noise-geometry validation for every trained encoder candidate
     set_seed(SEED)
     output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(device_arg or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -401,6 +427,7 @@ def noise_geometry_main(
     rows = []
     for name, spec in ENCODER_SPECS.items():
         print(f"geometry_encoder={name}")
+        # Load trained model artifacts and evaluate how this encoder transforms noise
         model = load_autoencoder(
             kind=spec["kind"],
             checkpoint_path=spec["checkpoint_path"],
@@ -430,6 +457,7 @@ def noise_geometry_main(
 
 def main() -> None:
     args = parse_args()
+    # Default compare-encoders mode runs both reconstruction and geometry validation
     run_reconstruction_validation(
         output_dir=args.output_dir,
         num_samples=args.num_samples,
