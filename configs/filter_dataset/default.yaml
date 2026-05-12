@@ -18,6 +18,8 @@ sigma_max: 0.8
 
 batch_size: 256
 num_workers: 0
+noisy_grid_n_images: 10
+grid_n_images: 64
 overwrite: false
 
 checkpoint_name: epoch_030.pth

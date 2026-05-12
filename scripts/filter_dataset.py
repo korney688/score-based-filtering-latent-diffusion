@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.DDPM_model import build_DDPM_model
-from src.filters import compute_latent_ddpm_scores, select_indices
+from src.filters import compute_latent_ddpm_scores, save_filtering_grids, save_noisy_filtering_grids, select_indices
 from src.tools import set_seed
 
 log = logging.getLogger(__name__)
@@ -99,9 +99,11 @@ def build_output_dir(cfg: DictConfig) -> Path:
 def write_outputs(
     output_dir: Path,
     cfg: DictConfig,
+    dataset,
     checkpoint_path: Path,
     score_table,
     selected_indices: np.ndarray,
+    visual_samples,
 ) -> None:
     # Save all artifacts needed to reproduce and reuse the selection.
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -112,6 +114,17 @@ def write_outputs(
     score_table.to_csv(output_dir / "scores.csv", index=False)
     np.save(output_dir / "selected_indices.npy", selected_indices)
     OmegaConf.save(config=cfg, f=output_dir / "config.yaml", resolve=True)
+    noisy_grid_files = save_noisy_filtering_grids(
+        visual_samples=visual_samples,
+        output_dir=output_dir,
+    )
+    clean_grid_files = save_filtering_grids(
+        dataset=dataset,
+        scores_df=score_table,
+        selected_indices=selected_indices,
+        output_dir=output_dir,
+        n_images=cfg.grid_n_images,
+    )
 
     metadata = {
         "ddpm_branch": cfg.ddpm_branch,
@@ -126,6 +139,9 @@ def write_outputs(
         "dataset": "torchvision MNIST train split",
         "num_scored_samples": int(len(score_table)),
         "num_selected_samples": int(len(selected_indices)),
+        "visual_grids": noisy_grid_files + clean_grid_files,
+        "main_visual_grids": noisy_grid_files,
+        "noisy_grid_source": "saved during the same scoring pass",
     }
     (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
@@ -146,7 +162,7 @@ def filter_dataset(cfg: DictConfig):
     dataset = build_mnist_train_dataset()
     ddpm_model = load_ddpm_from_checkpoint(cfg, checkpoint_path, device)
 
-    score_table = compute_latent_ddpm_scores(
+    score_table, visual_samples = compute_latent_ddpm_scores(
         dataset=dataset,
         ddpm_model=ddpm_model,
         device=device,
@@ -154,6 +170,7 @@ def filter_dataset(cfg: DictConfig):
         num_workers=cfg.num_workers,
         sigma_min=cfg.sigma_min,
         sigma_max=cfg.sigma_max,
+        visual_n_images=cfg.noisy_grid_n_images,
     )
     selected_indices = select_indices(
         score_table=score_table,
@@ -163,5 +180,5 @@ def filter_dataset(cfg: DictConfig):
         quantile_high=cfg.quantile_high,
     )
 
-    write_outputs(output_dir, cfg, checkpoint_path, score_table, selected_indices)
+    write_outputs(output_dir, cfg, dataset, checkpoint_path, score_table, selected_indices, visual_samples)
     log.info("Saved Stage 3 filtering outputs to %s", output_dir)
