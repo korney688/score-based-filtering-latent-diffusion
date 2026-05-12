@@ -1,228 +1,167 @@
-﻿import torch
-import numpy as np
-import pandas as pd
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split, Subset
-from tqdm import tqdm
+import json
 import logging
-import h5py
-
 import sys
-import os
-import shutil
-import time
-import datetime
+from datetime import datetime
+from pathlib import Path
 
-import hydra
+import numpy as np
+import torch
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
+from torchvision import datasets, transforms
 
-sys.path.append(os.getcwd()) 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
 
-# Импорт пользовательских функций
-from src.datasets import my_dataset
-from src.tools import set_seed
 from src.DDPM_model import build_DDPM_model
-from src.filters import run_DDPM_filter, run_DDPM_filter_v2
+from src.filters import compute_latent_ddpm_scores, select_indices
+from src.tools import set_seed
 
-
-# Инициализация Логгера
 log = logging.getLogger(__name__)
 
-def data_filtering (cfg: DictConfig):
 
-    # ------------------------------------------------------------------
-    # Загрузка конфигурации
-    try:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        seed = cfg.seed
-        
-        dataset_path = cfg.dataset_path
-        output_dir = cfg.output_dir
-        DDPM_model_path = cfg.DDPM_model_path
-        
-        percent = cfg.save_percent
-        mode = cfg.filter_mode
+def build_mnist_train_dataset():
+    # Use the original MNIST train split; filtering saves indices, not images.
+    transform = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Normalize((0.5,), (0.5,)),
+        ]
+    )
+    return datasets.MNIST(
+        root=PROJECT_ROOT / "data",
+        train=True,
+        download=False,
+        transform=transform,
+    )
 
-        # Модификация
-        ver = cfg.get('ver', 'v1')
-        params = cfg.get('params', [10,20,10])
-        
-        in_memory = cfg.get('in_memory', 'False')
-        
-        log.info(f"Параметры успешно считаны. device: {device}")
-    except Exception as e:
-        log.error(f'Ошибка при определении параметров -> ОСТАНОВКА. Execution: {e}', exc_info=True)
-        raise e
-    
-    log.info(f"Start filtering_dataset")
 
-    # ------------------------------------------------------------------
-    # Проверка путей
-    log.info(f"Провекра наличия предобученной модели DDPM")
-    if not os.path.exists(DDPM_model_path):
-        log.error(f"Чекпоинт модели НЕ найден: {DDPM_model_path}")
-        raise FileNotFoundError(f"Model checkpoint missing: {DDPM_model_path}")
+def resolve_checkpoint_path(cfg: DictConfig) -> Path:
+    # The DDPM branch selects the checkpoint used for scoring.
+    branch = cfg.ddpm_branch
+    if branch not in {"baseline", "induced"}:
+        raise ValueError(f"Unsupported ddpm_branch: {branch}")
 
-    log.info(f"Чекпоинт найден: {DDPM_model_path}")
-    
-    DDPM_checkpoint = torch.load(DDPM_model_path, map_location=device)
-        
+    checkpoint_roots = cfg.checkpoint_roots
+    checkpoint_root = Path(to_absolute_path(checkpoint_roots[branch]))
+    checkpoint_path = checkpoint_root / cfg.checkpoint_name
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Missing DDPM checkpoint: {checkpoint_path}")
+    return checkpoint_path
 
-    # ------------------------------------------------------------------
-    # Инициализация датасета
-    DDPM_params = DDPM_checkpoint['DDPM_params']
-    
-    dataset_norm = my_dataset(
-        h5_path=dataset_path,
-        data_key="dataset",
-        in_memory=in_memory,
-        apply_log=DDPM_params['apply_log'],
-        apply_norm=DDPM_params['apply_norm'],
-        apply_split=DDPM_params['apply_split'],
-        data_mode="image"
+
+def load_ddpm_from_checkpoint(cfg: DictConfig, checkpoint_path: Path, device: str):
+    # Rebuild the same latent-DDPM wrapper and load only the trainable UNet weights.
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint_params = checkpoint.get("DDPM_params", {})
+
+    base_dim = checkpoint_params.get("base_dim", cfg.model.base_dim)
+    deep = checkpoint_params.get("deep", cfg.model.deep)
+    latent_noise_mode = checkpoint.get("latent_noise_mode", cfg.ddpm_branch)
+    autoencoder_kind = checkpoint.get("autoencoder_kind", cfg.model.autoencoder_kind)
+    autoencoder_checkpoint_path = checkpoint.get(
+        "autoencoder_checkpoint_path",
+        to_absolute_path(cfg.model.autoencoder_checkpoint_path),
+    )
+
+    if latent_noise_mode != cfg.ddpm_branch:
+        raise ValueError(
+            f"Checkpoint latent_noise_mode={latent_noise_mode!r} does not match "
+            f"ddpm_branch={cfg.ddpm_branch!r}"
         )
 
-    # ------------------------------------------------------------------
-    # Загрузка параметров модели
-    try:
-        base_dim = DDPM_params['base_dim']
-        deep = DDPM_params.get('deep', 3)
-        DDPM_model = build_DDPM_model(base_dim, deep, device)
-        DDPM_model.model.load_state_dict(DDPM_checkpoint['model_state_dict'])
-        DDPM_model.model.eval()
-        
-        log.info("Модель DDPM загружена и переведена в режим eval.")
-    except Exception as e:
-        log.error(f"Ошибка при инициализации модели: {e}")
-        raise e
+    ddpm_model = build_DDPM_model(
+        base_dim=base_dim,
+        deep=deep,
+        device=device,
+        latent_noise_mode=latent_noise_mode,
+        autoencoder_kind=autoencoder_kind,
+        autoencoder_checkpoint_path=autoencoder_checkpoint_path,
+    )
+    ddpm_model.model.load_state_dict(checkpoint["model_state_dict"])
+    ddpm_model.eval()
+    return ddpm_model
 
-    # ------------------------------------------------------------------
-    # score_base filtering
-    if ver=='v2':
-        indices = run_DDPM_filter_v2(dataset_norm, DDPM_model, device, mode, percent, params)
+
+def build_output_dir(cfg: DictConfig) -> Path:
+    # Keep every Stage 3 run under one experiment root.
+    output_root = Path(to_absolute_path(cfg.output_root))
+    if cfg.filter_mode == "top_k":
+        run_name = f"top_k_{cfg.keep_ratio:g}"
+    elif cfg.filter_mode == "quantile":
+        run_name = f"quantile_{cfg.quantile_low:g}_{cfg.quantile_high:g}"
     else:
-        indices = run_DDPM_filter(dataset_norm, DDPM_model, device, mode, percent)
-    log.info(f"Процедура data_filtering завершена. Возвращено {len(indices)} индексов.")
-
-    return indices
+        raise ValueError(f"Unsupported filter_mode: {cfg.filter_mode}")
+    return output_root / cfg.ddpm_branch / run_name
 
 
+def write_outputs(
+    output_dir: Path,
+    cfg: DictConfig,
+    checkpoint_path: Path,
+    score_table,
+    selected_indices: np.ndarray,
+) -> None:
+    # Save all artifacts needed to reproduce and reuse the selection.
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-# Основная функция
+    score_table = score_table.copy()
+    score_table["selected"] = score_table["dataset_index"].isin(selected_indices)
+
+    score_table.to_csv(output_dir / "scores.csv", index=False)
+    np.save(output_dir / "selected_indices.npy", selected_indices)
+    OmegaConf.save(config=cfg, f=output_dir / "config.yaml", resolve=True)
+
+    metadata = {
+        "ddpm_branch": cfg.ddpm_branch,
+        "checkpoint_path": str(checkpoint_path),
+        "filtering_mode": cfg.filter_mode,
+        "keep_ratio": float(cfg.keep_ratio),
+        "quantile_low": float(cfg.quantile_low),
+        "quantile_high": float(cfg.quantile_high),
+        "seed": int(cfg.seed),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "score_definition": "score = ||eps_pred||^2",
+        "dataset": "torchvision MNIST train split",
+        "num_scored_samples": int(len(score_table)),
+        "num_selected_samples": int(len(selected_indices)),
+    }
+    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+
 def filter_dataset(cfg: DictConfig):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    set_seed(cfg.seed, device)
 
-    # ------------------------------------------------------------------
-    # Загрузка конфигурации
-    try:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        seed = cfg.seed
-        
-        dataset_path = cfg.dataset_path
-        output_dir = cfg.output_dir
-    
-        filter_mode = cfg.filter_mode
-        save_percent = cfg.save_percent
+    checkpoint_path = resolve_checkpoint_path(cfg)
+    output_dir = build_output_dir(cfg)
+    if output_dir.exists() and any(output_dir.iterdir()) and not cfg.overwrite:
+        raise FileExistsError(f"Output directory is not empty: {output_dir}")
 
-        in_memory = cfg.get('in_memory', 'False')
-        
-        log.info("Параметры успешно считаны")
-    except Exception as e:
-        log.error(f'Ошибка при определении параметров -> ОСТАНОВКА. Execution: {e}', exc_info=True)
-        raise e
-    
-    log.info(f"Start filtering_dataset")
+    log.info("Stage 3 filtering branch: %s", cfg.ddpm_branch)
+    log.info("Stage 3 filtering mode: %s", cfg.filter_mode)
+    log.info("DDPM checkpoint: %s", checkpoint_path)
 
-    # ------------------------------------------------------------------
-    # Проверка путей
-    os.makedirs(output_dir, exist_ok=True)
-    if os.path.exists(output_dir) and any(os.scandir(output_dir)):
-        msg = f"Output directory is not empty: {output_dir}"
-        log.error(msg)
-        raise FileExistsError(msg)
-    
-    # Проверка доступности входных данных
-    if not os.path.exists(dataset_path):
-        log.error(f"Missing clean data at {dataset_path}")
-        raise FileNotFoundError(f"Missing clean data at {dataset_path}")
+    dataset = build_mnist_train_dataset()
+    ddpm_model = load_ddpm_from_checkpoint(cfg, checkpoint_path, device)
 
-    # ------------------------------------------------------------------
-    # Настройка сидов
-    set_seed(seed, device)
+    score_table = compute_latent_ddpm_scores(
+        dataset=dataset,
+        ddpm_model=ddpm_model,
+        device=device,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.num_workers,
+        sigma_min=cfg.sigma_min,
+        sigma_max=cfg.sigma_max,
+    )
+    selected_indices = select_indices(
+        score_table=score_table,
+        filter_mode=cfg.filter_mode,
+        keep_ratio=cfg.keep_ratio,
+        quantile_low=cfg.quantile_low,
+        quantile_high=cfg.quantile_high,
+    )
 
-    # ------------------------------------------------------------------
-    # Инициализация датасета
-    full_dataset = my_dataset(
-        h5_path=dataset_path,
-        data_key="dataset",
-        snr_key='snr',
-        in_memory=in_memory,
-        apply_log=False,
-        apply_norm=False,
-        apply_split=False,
-        data_mode="image"
-        )
-    
-    log.info(f'Dataset shape: {full_dataset.shape}')
-
-    # ------------------------------------------------------------------
-    # Фильтрация датасета
-    if filter_mode == 'random':
-        log.info(f"Начало отбора данных. Метод: {filter_mode}, Keep: {save_percent}%")
-        indices = np.random.choice(full_dataset.shape[0], size=int(full_dataset.shape[0] * save_percent/100), replace=False)
-    else:
-        indices = data_filtering(cfg)
-   
-    # ------------------------------------------------------------------
-    # Сохранение отфильтрованного датасета
-    filtered_subset = Subset(full_dataset, indices)
-    log.info(f'Filtered dataset shape: {len(indices)}')
-    
-    batch_size = 32 # или больше, зависит от вашей RAM
-    filtered_loader = DataLoader(filtered_subset, batch_size=batch_size, shuffle=False)
-
-    save_path = os.path.join(output_dir, "filtered_dataset.h5")
-    try:
-        with h5py.File(save_path, 'w') as hf:
-            # 1. Берем первый элемент для определения размерностей и ТИПА ДАННЫХ
-            sample_data, sample_snr = full_dataset[0]
-            
-            # Определяем форму (shape)
-            data_shape = (len(indices), *sample_data.shape)
-            snr_shape = (len(indices),) if getattr(sample_snr, 'shape', None) in [(), None] else (len(indices), *sample_snr.shape)
-            
-            # 2. ДИНАМИЧЕСКИ извлекаем оригинальный тип (dtype), конвертируя семпл в numpy
-            data_dtype = sample_data.cpu().numpy().dtype if isinstance(sample_data, torch.Tensor) else np.array(sample_data).dtype
-            snr_dtype = sample_snr.cpu().numpy().dtype if isinstance(sample_snr, torch.Tensor) else np.array(sample_snr).dtype
-            
-            log.info(f"Определены типы данных для сохранения. Dataset: {data_dtype}, SNR: {snr_dtype}")
-
-            # 3. Создаем HDF5 с ОРИГИНАЛЬНЫМИ типами (вместо жесткого np.float32)
-            h5_dataset = hf.create_dataset("dataset", shape=data_shape, dtype=data_dtype)
-            h5_snr = hf.create_dataset("snr", shape=snr_shape, dtype=snr_dtype)
-            
-            start_idx = 0
-            # Сохраняем по батчам
-            for batch_data, batch_snr in tqdm(filtered_loader, desc="Saving H5"):
-                end_idx = start_idx + batch_data.shape[0]
-                
-                # Отвязываем от графов и переводим в numpy
-                np_data = batch_data.detach().cpu().numpy()
-                np_snr = batch_snr.detach().cpu().numpy()
-                
-                # Принудительно страхуем совпадение типов с HDF5 
-                # (на случай, если Dataloader где-то кастанул тип)
-                np_data = np_data.astype(data_dtype)
-                np_snr = np_snr.astype(snr_dtype)
-                
-                h5_dataset[start_idx:end_idx] = np_data
-                h5_snr[start_idx:end_idx] = np_snr
-                
-                start_idx = end_idx
-                
-        log.info(f"Успешно сохранено: {save_path}")
-        
-    except Exception as e:
-        log.error(f"Ошибка при сохранении .h5 файла: {e}")
-        raise e
+    write_outputs(output_dir, cfg, checkpoint_path, score_table, selected_indices)
+    log.info("Saved Stage 3 filtering outputs to %s", output_dir)

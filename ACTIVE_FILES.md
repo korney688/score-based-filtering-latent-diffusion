@@ -95,18 +95,15 @@ Kept for future adaptation:
 Entrypoints:
 
 - `scripts/main.py task=filter_dataset`
-- `scripts/evaluate_pipeline.py filtering-analysis`
 
 Required files:
 
 - `scripts/filter_dataset.py`
-- `scripts/evaluate_pipeline.py`
-- `src/evaluation/filtering_evaluation.py`
-- `src/filter_mnist_top_k.py`
-- `src/filter_mnist_qq.py`
+- `configs/filter_dataset/default.yaml`
 - `src/DDPM_model.py`
 - `src/Unet_model.py`
 - `src/autoencoder.py`
+- `src/autoencoder_noise_consistency.py`
 - `src/datasets.py`
 - `src/filters.py`
 - `src/tools.py`
@@ -116,7 +113,6 @@ Required files:
 Entrypoints:
 
 - `scripts/train_tdncnn.py`
-- `scripts/evaluate_pipeline.py downstream-validation`
 
 Required files:
 
@@ -130,7 +126,6 @@ Required files:
 
 - `scripts/evaluate_encoder.py`
 - `scripts/evaluate_latent_ddpm_score.py`
-- `scripts/evaluate_pipeline.py`
 - `scripts/filter_dataset.py`
 - `scripts/main.py`
 - `scripts/train_ddpm.py`
@@ -153,11 +148,8 @@ Required files:
 - `src/datasets.py`
 - `src/evaluation/__init__.py`
 - `src/evaluation/encoder_validation.py`
-- `src/evaluation/filtering_evaluation.py`
 - `src/evaluation/latent_ddpm_score_validation.py`
 - `src/evaluation/score_calibration.py`
-- `src/filter_mnist_qq.py`
-- `src/filter_mnist_top_k.py`
 - `src/filters.py`
 - `src/tdncnn_datasets.py`
 - `src/tools.py`

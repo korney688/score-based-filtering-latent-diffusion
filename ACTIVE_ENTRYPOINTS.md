@@ -63,16 +63,31 @@ There is no active calibration entrypoint right now. `src/evaluation/score_calib
 ## 6. Score-Based Filtering
 
 - `scripts/main.py task=filter_dataset`
-- `scripts/evaluate_pipeline.py filtering-analysis`
 
 Implementation:
 
 - `scripts/filter_dataset.py`
-- `src/evaluation/filtering_evaluation.py`
+- `src/filters.py`
+
+Modes:
+
+- `filter_dataset.filter_mode=top_k`
+- `filter_dataset.filter_mode=quantile`
+
+DDPM branches:
+
+- `filter_dataset.ddpm_branch=baseline`
+- `filter_dataset.ddpm_branch=induced`
+
+Outputs:
+
+- `experiments/exp_005_filtering/<branch>/<mode>/scores.csv`
+- `experiments/exp_005_filtering/<branch>/<mode>/selected_indices.npy`
+- `experiments/exp_005_filtering/<branch>/<mode>/config.yaml`
+- `experiments/exp_005_filtering/<branch>/<mode>/metadata.json`
 
 ## 7. TDnCNN Downstream Validation
 
-- `scripts/evaluate_pipeline.py downstream-validation`
 - `scripts/train_tdncnn.py`
 
 Implementation:

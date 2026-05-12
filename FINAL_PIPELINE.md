@@ -140,27 +140,51 @@ Hydra entrypoint:
 python scripts/main.py task=filter_dataset
 ```
 
-Filtering analysis:
+Stage 3 uses the MNIST train split only. It does not create a new image dataset.
+
+Protocol:
+
+```text
+MNIST train image
+-> online Gaussian noising
+-> selected encoder
+-> latent DDPM
+-> score = ||eps_pred||^2
+-> index selection
+```
+
+Supported DDPM branches:
+
+- `filter_dataset.ddpm_branch=baseline`
+- `filter_dataset.ddpm_branch=induced`
+
+Supported filtering modes:
+
+- `filter_dataset.filter_mode=top_k`
+- `filter_dataset.filter_mode=quantile`
+
+Example commands:
 
 ```bash
-python scripts/evaluate_pipeline.py filtering-analysis
+python scripts/main.py task=filter_dataset filter_dataset.ddpm_branch=baseline filter_dataset.filter_mode=top_k filter_dataset.keep_ratio=0.1
+python scripts/main.py task=filter_dataset filter_dataset.ddpm_branch=baseline filter_dataset.filter_mode=quantile filter_dataset.quantile_low=0.0 filter_dataset.quantile_high=0.1
+python scripts/main.py task=filter_dataset filter_dataset.ddpm_branch=induced filter_dataset.filter_mode=top_k filter_dataset.keep_ratio=0.1
+python scripts/main.py task=filter_dataset filter_dataset.ddpm_branch=induced filter_dataset.filter_mode=quantile filter_dataset.quantile_low=0.0 filter_dataset.quantile_high=0.1
 ```
 
 Implementation:
 
 - `scripts/filter_dataset.py`
-- `src/evaluation/filtering_evaluation.py`
 - `src/filters.py`
-- `src/filter_mnist_top_k.py`
-- `src/filter_mnist_qq.py`
+
+Outputs:
+
+- `experiments/exp_005_filtering/<branch>/<mode>/scores.csv`
+- `experiments/exp_005_filtering/<branch>/<mode>/selected_indices.npy`
+- `experiments/exp_005_filtering/<branch>/<mode>/config.yaml`
+- `experiments/exp_005_filtering/<branch>/<mode>/metadata.json`
 
 ## 7. TDnCNN Downstream Validation
-
-Validation entrypoint:
-
-```bash
-python scripts/evaluate_pipeline.py downstream-validation
-```
 
 Training suite entrypoint:
 

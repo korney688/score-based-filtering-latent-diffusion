@@ -3,26 +3,32 @@ defaults:
 
 seed: 42
 
-# train noisy dataset
-dataset_path: "./data/dataset_noisy_var/dataset_noisy_var.h5"
+# Stage 3 explicitly selects which validated latent-DDPM branch is used.
+ddpm_branch: baseline # baseline | induced
 
-# Путь к Диффузионной модели
-DDPM_model: 'DDPM_model'
-DDPM_checkpoint: 'best_model.pth'
-DDPM_model_path: './models/${.DDPM_model}/${.DDPM_checkpoint}'
+# Stage 3 keeps only index selections; no filtered H5 dataset is created.
+filter_mode: top_k # top_k | quantile
+keep_ratio: 0.1
+quantile_low: 0.0
+quantile_high: 0.1
 
-# параметры фильтрации
+# Use the same sigma interval as Stage 2 latent-DDPM score validation.
+sigma_min: 0.1
+sigma_max: 0.8
 
-# в проекте
-ver: 'v1'
-params: [10,20,3] # для v_2
+batch_size: 256
+num_workers: 0
+overwrite: false
 
-filter_mode: 'top_k' # ['top_k', 'QQ_spread', 'random']
-save_percent: 10
+checkpoint_name: epoch_030.pth
+checkpoint_roots:
+  baseline: outputs/ddpm/latent_ddpm_baseline_ae_noise_consistency_mnist
+  induced: outputs/ddpm/latent_ddpm_induced_ae_noise_consistency_mnist
 
-# Папка, куда сохранится обученная модель
-id_label: ''
-output_dir: "./data/dataset_filtered_${.filter_mode}_${.save_percent}_${.id_label}"
+model:
+  base_dim: 16
+  deep: 3
+  autoencoder_kind: noise_consistency
+  autoencoder_checkpoint_path: models/autoencoders/ae_noise_consistency_mnist/autoencoder_checkpoint.pt
 
-# Dataset params
-in_memory: True
+output_root: experiments/exp_005_filtering

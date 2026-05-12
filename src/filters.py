@@ -1,185 +1,113 @@
 import logging
-import torch
-import numpy as np
-from torch.utils.data import DataLoader
 
-# Создаем логгер для этого файла
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
 log = logging.getLogger(__name__)
 
-def top_k_filter(scores, pcnt):
-    log.info(f"Запуск фильтрации Top-K: оставляем {pcnt}% с наименьшим score.")
-    
-    if len(scores) == 0:
-        log.error("В top_k_filter передан пустой список scores!")
-        return torch.tensor([])
 
-    N_samples = int(pcnt * scores.shape[0] / 100)
-    indices = torch.topk(scores, N_samples, largest=False).indices 
-    
-    log.info(f"Top-K фильтрация завершена. Отобрано {len(indices)} индексов.")
-    return indices
+def sigma_to_t(model, sigma: torch.Tensor) -> torch.Tensor:
+    # Use the same sigma-to-timestep mapping as Stage 2 score validation.
+    schedule = torch.sqrt(1.0 - model.alphas_cumprod)
+    sigma = sigma.detach().clamp(float(schedule[0]), float(schedule[-1]))
+    idx = torch.searchsorted(schedule, sigma)
+    idx = idx.clamp(0, schedule.shape[0] - 1)
+    prev_idx = (idx - 1).clamp(0, schedule.shape[0] - 1)
 
-
-def QQ_spread_filter(scores, pcnt):
-    log.info(f"Запуск фильтрации QQ_spread: оставляем {pcnt}% (стратифицированно).")
-
-    scores_np = scores.cpu().numpy()
-    
-    if len(scores_np) == 0:
-        log.error("В QQ_spread_filter передан пустой список scores!")
-        return torch.tensor([])
-
-    min_points_per_bin = 30
-    
-    # Вычисляем количество bins
-    num_bins = max(1, len(scores_np) // min_points_per_bin)
-    log.debug(f"QQ_spread: разбиение на {num_bins} бинов.")
-    
-    # Квантили для границ bins
-    quantiles = np.linspace(0, 100, num_bins + 1)
-    bin_edges = np.percentile(scores_np, quantiles)
-    
-    # Присваиваем каждой точке номер бина
-    bin_assignments = np.digitize(scores_np, bin_edges[:-1], right=False) - 1
-    bin_assignments = np.clip(bin_assignments, 0, num_bins - 1)
-    
-    random_indices = []
-    
-    for i in range(num_bins):
-        bin_mask = (bin_assignments == i)
-        indices_in_bin = np.where(bin_mask)[0]
-        
-        if len(indices_in_bin) > 0:
-            N = max(1, int(pcnt * len(indices_in_bin) / 100))
-            selected = np.random.choice(indices_in_bin, size=min(N, len(indices_in_bin)), replace=False)
-            random_indices.extend(selected)
-    
-    final_indices = torch.from_numpy(np.array(random_indices)).long()
-    
-    log.info(f"QQ_spread фильтрация завершена. Отобрано {len(final_indices)} индексов.")
-    return final_indices
+    cur_err = (schedule[idx] - sigma).abs()
+    prev_err = (schedule[prev_idx] - sigma).abs()
+    return torch.where(prev_err < cur_err, prev_idx, idx).long()
 
 
-def run_DDPM_filter(dataset, DDPM_model, device, mode='top_k', percent=50):
+def compute_latent_ddpm_scores(
+    dataset,
+    ddpm_model,
+    device: str,
+    batch_size: int,
+    num_workers: int,
+    sigma_min: float,
+    sigma_max: float,
+) -> pd.DataFrame:
+    # Score every MNIST train sample with the Stage 2 definition: ||eps_pred||^2.
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device == "cuda",
+    )
 
-    log.info(f"Начало отбора данных. Метод: {mode}, Keep: {percent}%")
-    
-    if len(dataset) == 0:
-        log.error("Передан пустой датасет! Фильтрация невозможна.")
-        return None
+    ddpm_model.eval()
+    rows = []
+    offset = 0
 
-    loader = DataLoader(dataset, 
-            batch_size=32, 
-            shuffle=False,
-            num_workers=4, 
-            pin_memory=True if device == 'cuda' else False
+    with torch.no_grad():
+        for batch in tqdm(loader, desc="Scoring MNIST train"):
+            x = batch[0] if isinstance(batch, (tuple, list)) else batch
+            x = x.to(device)
+            current_batch_size = x.shape[0]
+
+            sigma = torch.empty(current_batch_size, device=device).uniform_(sigma_min, sigma_max)
+            t = sigma_to_t(ddpm_model, sigma)
+
+            z_0 = ddpm_model._encode_to_latent(x)
+            z_t, _ = ddpm_model._make_noisy_latent_batch(x, z_0, t)
+            eps_pred = ddpm_model.model(z_t, t)
+            score = eps_pred.flatten(start_dim=1).pow(2).sum(dim=1)
+
+            batch_indices = np.arange(offset, offset + current_batch_size, dtype=np.int64)
+            rows.append(
+                pd.DataFrame(
+                    {
+                        "dataset_index": batch_indices,
+                        "score": score.cpu().numpy().astype(np.float32),
+                        "sigma": sigma.cpu().numpy().astype(np.float32),
+                    }
+                )
+            )
+            offset += current_batch_size
+
+    score_table = pd.concat(rows, ignore_index=True)
+    log.info("Computed scores for %s MNIST train samples", len(score_table))
+    return score_table
+
+
+def select_lowest_top_k(score_table: pd.DataFrame, keep_ratio: float) -> np.ndarray:
+    # Lower score means a more typical sample for the current filtering protocol.
+    if not 0 < keep_ratio <= 1:
+        raise ValueError(f"keep_ratio must be in (0, 1], got {keep_ratio}")
+
+    keep_count = max(1, int(len(score_table) * keep_ratio))
+    selected = score_table.nsmallest(keep_count, "score")["dataset_index"].to_numpy(dtype=np.int64)
+    return np.sort(selected)
+
+
+def select_quantile_range(score_table: pd.DataFrame, quantile_low: float, quantile_high: float) -> np.ndarray:
+    # Keep samples whose scores fall inside an explicit score quantile interval.
+    if not 0 <= quantile_low < quantile_high <= 1:
+        raise ValueError(
+            f"Expected 0 <= quantile_low < quantile_high <= 1, got {quantile_low}, {quantile_high}"
         )
-    DDPM_model.eval()
-    
-    score_list = []
-    
-    try:
-        # Параметры логирования
-        total_batches = len(loader)
-        log_interval = max(1, int(total_batches * 0.2)) # каждые 20%
-        
-        with torch.no_grad():
-            for i, x_batch in enumerate(loader):
-                x_batch = x_batch.to(device)
-            
-                t = torch.zeros(len(x_batch), device=device).long() 
-                
-                current_score = DDPM_model.get_score(x_batch, t)
-                
-                if torch.isnan(current_score).any():
-                    log.error(f"NaN значения обнаружены в score на батче {i}!")
-                
-                current_score = current_score.reshape(current_score.shape[0], -1)
-                score_norm = current_score.norm(dim=1)
-                
-                score_list.append(score_norm.cpu())
 
-                # Логируем процесс
-                if (i + 1) % log_interval == 0 or (i + 1) == total_batches:
-                    percent_done = int((i + 1) / total_batches * 100)
-                    log.info(f"Обработано: {i + 1}/{total_batches} ({percent_done}%)")
+    low_value = float(score_table["score"].quantile(quantile_low))
+    high_value = float(score_table["score"].quantile(quantile_high))
+    mask = (score_table["score"] >= low_value) & (score_table["score"] <= high_value)
+    selected = score_table.loc[mask, "dataset_index"].to_numpy(dtype=np.int64)
+    return np.sort(selected)
 
 
-    except Exception as e:
-        log.error(f"Ошибка во время цикла расчета score: {e}")
-        raise e
-
-    score_norm = torch.cat(score_list, dim=0).detach()
-    log.info(f"Расчет score завершен. Всего элементов: {score_norm.shape[0]}")
-
-    if mode == 'top_k':
-        return top_k_filter(score_norm, percent)
-
-    elif mode == 'QQ_spread':
-        return QQ_spread_filter(score_norm, percent)
-
-    else:
-        log.error(f"Передан неизвестный режим фильтрации: {mode}")
-        raise ValueError(f"Unknown filtering mode: {mode}")
-
-
-def run_DDPM_filter_v2(dataset, DDPM_model, device, mode='top_k', percent=50, params=[0,0,1]):
-
-    log.info(f"Начало отбора данных. Метод: {mode}, Keep: {percent}%")
-    
-    if len(dataset) == 0:
-        log.error("Передан пустой датасет! Фильтрация невозможна.")
-        return None
-
-    loader = DataLoader(dataset, 
-            batch_size=32, 
-            shuffle=False,
-            num_workers=4, 
-            pin_memory=True if device == 'cuda' else False
-        )
-    DDPM_model.eval()
-    
-    score_list = []
-    
-    try:
-
-        log.info(f"Начало расчета score для t с {params[0]} до {params[1]}, количество {params[2]}")
-        
-        score_list_comm = []
-        with torch.no_grad():
-            for i in set(np.linspace(params[0], params[1], params[2], dtype='int8')):
-                score_list = []
-                for x_batch in loader:
-                    x_batch = x_batch.to(device)
-                    t = torch.zeros(len(x_batch), device=device).int() + i
-                    current_score = DDPM_model.get_score(x_batch, t)
-                    
-                    # if torch.isnan(current_score).any():
-                    #     log.error(f"NaN значения обнаружены в score на батче {i}!")
-                        
-                    current_score = current_score.reshape(current_score.shape[0], -1)
-                    score_norm = current_score.norm(dim=1)
-                    
-                    score_list.append(score_norm)
-            
-                score_norm = torch.cat(score_list, dim=0)
-                score_list_comm.append(score_norm)
-                log.info(f"Обработано t = {i}")
-        
-        score_norm = torch.stack(score_list_comm).norm(dim=0)
-
-    except Exception as e:
-        log.error(f"Ошибка во время цикла расчета score: {e}")
-        raise e
-        
-    log.info(f"Расчет score завершен. Всего элементов: {score_norm.shape[0]}")
-
-    if mode == 'top_k':
-        return top_k_filter(score_norm, percent)
-
-    elif mode == 'QQ_spread':
-        return QQ_spread_filter(score_norm, percent)
-
-    else:
-        log.error(f"Передан неизвестный режим фильтрации: {mode}")
-        raise ValueError(f"Unknown filtering mode: {mode}")
+def select_indices(
+    score_table: pd.DataFrame,
+    filter_mode: str,
+    keep_ratio: float,
+    quantile_low: float,
+    quantile_high: float,
+) -> np.ndarray:
+    if filter_mode == "top_k":
+        return select_lowest_top_k(score_table, keep_ratio)
+    if filter_mode == "quantile":
+        return select_quantile_range(score_table, quantile_low, quantile_high)
+    raise ValueError(f"Unsupported filter_mode: {filter_mode}")

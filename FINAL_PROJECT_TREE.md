@@ -44,7 +44,6 @@ notebooks/
 scripts/
   evaluate_encoder.py
   evaluate_latent_ddpm_score.py
-  evaluate_pipeline.py
   filter_dataset.py
   internal/
     __init__.py
@@ -67,8 +66,6 @@ src/
   autoencoder_vae.py
   datasets.py
   DDPM_model.py
-  filter_mnist_qq.py
-  filter_mnist_top_k.py
   filters.py
   tdncnn_datasets.py
   TDnCNN_image.py
@@ -77,7 +74,6 @@ src/
   evaluation/
     __init__.py
     encoder_validation.py
-    filtering_evaluation.py
     latent_ddpm_score_validation.py
     score_calibration.py
 
