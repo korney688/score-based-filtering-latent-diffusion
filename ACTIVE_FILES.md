@@ -28,7 +28,6 @@ Entrypoint:
 Required files:
 
 - `src/evaluation/encoder_validation.py`
-- `src/evaluation/encoder_score_validation.py`
 - `src/autoencoder.py`
 - `src/autoencoder_noise_consistency.py`
 - `src/autoencoder_representation.py`
@@ -153,7 +152,6 @@ Required files:
 - `src/autoencoder_vae.py`
 - `src/datasets.py`
 - `src/evaluation/__init__.py`
-- `src/evaluation/encoder_score_validation.py`
 - `src/evaluation/encoder_validation.py`
 - `src/evaluation/filtering_evaluation.py`
 - `src/evaluation/latent_ddpm_score_validation.py`

@@ -21,13 +21,11 @@ Modes:
 
 - `compare-encoders`
 - `noise-geometry`
-- `score-validation`
 - `all`
 
 Implementation modules:
 
 - `src/evaluation/encoder_validation.py`
-- `src/evaluation/encoder_score_validation.py`
 
 ## 3. Latent-DDPM Training
 

@@ -23,7 +23,7 @@ def main() -> None:
         "mode",
         nargs="?",
         default="compare-encoders",
-        choices=["compare-encoders", "noise-geometry", "score-validation", "all"],
+        choices=["compare-encoders", "noise-geometry", "all"],
     )
     args, forwarded_args = parser.parse_known_args()
 
@@ -36,12 +36,6 @@ def main() -> None:
         from src.evaluation import encoder_validation
 
         run_with_forwarded_args(encoder_validation.noise_geometry_main, forwarded_args)
-
-    # Stage 1: validate whether DDPM score behavior is useful for encoder selection
-    if args.mode in {"score-validation", "all"}:
-        from src.evaluation import encoder_score_validation
-
-        run_with_forwarded_args(encoder_score_validation.main, forwarded_args)
 
 
 if __name__ == "__main__":

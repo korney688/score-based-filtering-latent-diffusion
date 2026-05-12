@@ -40,7 +40,6 @@ Other encoder-validation modes:
 
 ```bash
 python scripts/evaluate_encoder.py noise-geometry
-python scripts/evaluate_encoder.py score-validation
 python scripts/evaluate_encoder.py all
 ```
 
@@ -49,12 +48,10 @@ Scope:
 - compare candidate encoders
 - measure reconstruction quality
 - measure latent noise geometry
-- optionally compare score behavior for encoder selection
 
 Implementation:
 
 - `src/evaluation/encoder_validation.py`
-- `src/evaluation/encoder_score_validation.py`
 
 ## 3. Latent-DDPM Training
 

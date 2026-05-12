@@ -76,7 +76,6 @@ src/
   Unet_model.py
   evaluation/
     __init__.py
-    encoder_score_validation.py
     encoder_validation.py
     filtering_evaluation.py
     latent_ddpm_score_validation.py
@@ -99,4 +98,3 @@ Dockerfile
 ## Notes
 
 - `scripts/evaluate_latent_ddpm_score.py` is the only active entrypoint for frozen-encoder latent-DDPM score validation.
-- `src/evaluation/encoder_score_validation.py` belongs to Stage 1 encoder comparison, not the final frozen-encoder DDPM validation.
