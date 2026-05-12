@@ -1,3 +1,9 @@
+"""Legacy Stage 1 helper for comparing several encoders through DDPM scores.
+
+This is not the final frozen-encoder DDPM validation. The active Stage 2 DDPM
+score validation lives in src.evaluation.latent_ddpm_score_validation.
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -18,15 +24,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from src.Unet_model import UNet
+from src.DDPM_model import build_DDPM_model
 from src.autoencoder import SimpleAE
 from src.autoencoder_noise_consistency import NoiseConsistencyAutoencoder
 from src.autoencoder_representation import RepresentationAutoencoder
 from src.autoencoder_vae import VariationalAutoencoder
 
 
-OUTPUT_DIR = PROJECT_ROOT / "experiments" / "exp_003_aligned_latent_ddpm" / "score_validation"
-DDPM_PATH = PROJECT_ROOT / "outputs" / "ddpm_baseline" / "ddpm_mnist_baseline.pt"
+OUTPUT_DIR = PROJECT_ROOT / "experiments" / "exp_002_encoder_validation" / "score_validation"
+DDPM_RUN_DIR = PROJECT_ROOT / "outputs" / "ddpm" / "latent_ddpm_baseline_ae_noise_consistency_mnist"
+DDPM_PATH = DDPM_RUN_DIR / "epoch_030.pth"
+AUTOENCODER_CHECKPOINT_PATH = (
+    PROJECT_ROOT / "models" / "autoencoders" / "ae_noise_consistency_mnist" / "autoencoder_checkpoint.pt"
+)
 BATCH_SIZE = 128
 FAST_NUM_SAMPLES = 500
 FULL_NUM_SAMPLES = 2000
@@ -133,28 +143,27 @@ def load_ddpm_model(ddpm_path: Path, device: torch.device) -> tuple[torch.nn.Mod
         raise FileNotFoundError(f"Missing DDPM checkpoint: {ddpm_path}")
 
     checkpoint = torch.load(ddpm_path, map_location=device)
-    base_dim = int(checkpoint.get("base_dim", 16))
-    time_dim = int(checkpoint.get("time_dim", 128))
-    n_steps = int(checkpoint.get("n_steps", 1000))
+    ddpm_params = checkpoint.get("DDPM_params", {})
+    base_dim = int(ddpm_params.get("base_dim", 16))
+    deep = int(ddpm_params.get("deep", 3))
+    latent_noise_mode = checkpoint.get("latent_noise_mode", "baseline")
+    autoencoder_kind = checkpoint.get("autoencoder_kind", "noise_consistency")
+    autoencoder_checkpoint_path = checkpoint.get("autoencoder_checkpoint_path", str(AUTOENCODER_CHECKPOINT_PATH))
 
-    model = UNet(
-        in_channels=1,
-        out_channels=1,
+    model = build_DDPM_model(
         base_dim=base_dim,
-        time_dim=time_dim,
-        residual=True,
-        kernel_sizes=[3, 3, 3],
-        strides=[2, 2, 2],
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    for param in model.parameters():
+        deep=deep,
+        device=str(device),
+        latent_noise_mode=latent_noise_mode,
+        autoencoder_kind=autoencoder_kind,
+        autoencoder_checkpoint_path=autoencoder_checkpoint_path,
+    )
+    model.model.load_state_dict(checkpoint["model_state_dict"])
+    model.model.eval()
+    for param in model.model.parameters():
         param.requires_grad = False
 
-    betas = torch.linspace(1e-4, 0.02, n_steps, device=device)
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)
-    noise_std_schedule = torch.sqrt(1.0 - alphas_cumprod)
+    noise_std_schedule = torch.sqrt(1.0 - model.alphas_cumprod)
     return model, noise_std_schedule
 
 
@@ -200,7 +209,7 @@ def sigma_to_t(sigma_flat: torch.Tensor, noise_std_schedule: torch.Tensor) -> to
 def build_raw_score_dataset(
     loader: DataLoader,
     ae: torch.nn.Module,
-    ddpm_model: torch.nn.Module,
+    ddpm_model,
     noise_std_schedule: torch.Tensor,
     sigma_min: float,
     sigma_max: float,
@@ -220,11 +229,10 @@ def build_raw_score_dataset(
             x_sigma = x + sigma.view(-1, 1, 1, 1) * eps_x
 
             z_noisy = flatten_latent(encode_deterministic(ae, x_sigma))
-            x_hat = ae.decode(z_noisy)
-            x_hat = x_hat * 2.0 - 1.0
+            z_noisy_view = z_noisy.view(z_noisy.shape[0], z_noisy.shape[1], 1, 1)
 
             t_sigma = sigma_to_t(sigma, noise_std_schedule)
-            eps_pred = ddpm_model(x_hat, t_sigma)
+            eps_pred = ddpm_model.model(z_noisy_view, t_sigma)
             raw_score = eps_pred.flatten(start_dim=1).pow(2).sum(dim=1)
 
             sigma_all.append(sigma.cpu().numpy().astype(np.float32))
@@ -510,287 +518,6 @@ def main() -> None:
     print(f"quick_summary_csv={csv_path}")
     print(f"quick_summary_md={md_path}")
     print(f"summary_md={summary_path}")
-
-
-# Protocol mode: latent-consistency.
-import json
-import sys
-from pathlib import Path
-from typing import Any
-
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import torch
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
-
-latent_consistency_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(latent_consistency_PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(latent_consistency_PROJECT_ROOT))
-
-from src.Unet_model import UNet
-from src.autoencoder import SimpleAE
-
-
-latent_consistency_INPUT_ENCODER_PATH = latent_consistency_PROJECT_ROOT / "outputs" / "ae_baseline_mnist" / "E.pt"
-latent_consistency_INPUT_AE_CHECKPOINT_PATH = latent_consistency_PROJECT_ROOT / "outputs" / "ae_baseline_mnist" / "autoencoder_checkpoint.pt"
-latent_consistency_INPUT_DDPM_PATH = latent_consistency_PROJECT_ROOT / "outputs" / "ddpm_baseline" / "ddpm_mnist_baseline.pt"
-
-latent_consistency_OUTPUT_DIR = latent_consistency_PROJECT_ROOT / "experiments" / "exp_003_aligned_latent_ddpm" / "latent_consistency"
-latent_consistency_METRICS_PATH = latent_consistency_OUTPUT_DIR / "metrics.json"
-latent_consistency_CSV_PATH = latent_consistency_OUTPUT_DIR / "data.csv"
-latent_consistency_SCATTER_A_PATH = latent_consistency_OUTPUT_DIR / "sigma_vs_score_A_scatter.png"
-latent_consistency_SCATTER_B_PATH = latent_consistency_OUTPUT_DIR / "sigma_vs_score_B_scatter.png"
-latent_consistency_BINNED_A_PATH = latent_consistency_OUTPUT_DIR / "sigma_bins_mean_score_A.png"
-latent_consistency_BINNED_B_PATH = latent_consistency_OUTPUT_DIR / "sigma_bins_mean_score_B.png"
-
-latent_consistency_BATCH_SIZE = 128
-latent_consistency_NUM_SAMPLES = 2000
-latent_consistency_SEED = 42
-latent_consistency_SIGMA_MIN = 0.1
-latent_consistency_SIGMA_MAX = 0.8
-latent_consistency_NUM_BINS = 10
-latent_consistency_DDPM_BETA_START = 1e-4
-latent_consistency_DDPM_BETA_END = 0.02
-
-
-def latent_consistency_set_seed(seed: int) -> None:
-    torch.manual_seed(seed)
-    np.random.seed(seed)
-
-
-def latent_consistency__extract_state_dict(maybe_state: Any) -> dict[str, torch.Tensor]:
-    if isinstance(maybe_state, dict) and "state_dict" in maybe_state and isinstance(maybe_state["state_dict"], dict):
-        return maybe_state["state_dict"]
-    if isinstance(maybe_state, dict):
-        return maybe_state
-    raise ValueError("Unsupported checkpoint format: expected a state dict-like object.")
-
-
-def latent_consistency_build_loader() -> DataLoader:
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
-        ]
-    )
-    dataset = datasets.MNIST(
-        root=str(latent_consistency_PROJECT_ROOT / "data"),
-        train=False,
-        download=False,
-        transform=transform,
-    )
-    subset_indices = np.arange(min(latent_consistency_NUM_SAMPLES, len(dataset)), dtype=np.int64)
-    subset = torch.utils.data.Subset(dataset, subset_indices.tolist())
-    return DataLoader(subset, batch_size=latent_consistency_BATCH_SIZE, shuffle=False, num_workers=0)
-
-
-def latent_consistency_load_autoencoder(device: torch.device) -> SimpleAE:
-    model = SimpleAE().to(device)
-
-    if latent_consistency_INPUT_ENCODER_PATH.exists():
-        encoder_state = latent_consistency__extract_state_dict(torch.load(latent_consistency_INPUT_ENCODER_PATH, map_location=device))
-        model.encoder.load_state_dict(encoder_state)
-    elif latent_consistency_INPUT_AE_CHECKPOINT_PATH.exists():
-        checkpoint = torch.load(latent_consistency_INPUT_AE_CHECKPOINT_PATH, map_location=device)
-        checkpoint_dict = checkpoint if isinstance(checkpoint, dict) else {}
-        if "model_state_dict" in checkpoint_dict:
-            model.load_state_dict(checkpoint_dict["model_state_dict"])
-        else:
-            state_dict = latent_consistency__extract_state_dict(checkpoint)
-            model.load_state_dict(state_dict)
-    else:
-        raise FileNotFoundError(
-            "Missing checkpoint. Expected one of: "
-            f"{latent_consistency_INPUT_ENCODER_PATH} or {latent_consistency_INPUT_AE_CHECKPOINT_PATH}"
-        )
-
-    model.eval()
-    for param in model.parameters():
-        param.requires_grad = False
-    return model
-
-
-def latent_consistency_load_ddpm_model(device: torch.device) -> tuple[torch.nn.Module, torch.Tensor]:
-    if not latent_consistency_INPUT_DDPM_PATH.exists():
-        raise FileNotFoundError(f"Missing DDPM checkpoint: {latent_consistency_INPUT_DDPM_PATH}")
-
-    checkpoint = torch.load(latent_consistency_INPUT_DDPM_PATH, map_location=device)
-    base_dim = int(checkpoint.get("base_dim", 16))
-    time_dim = int(checkpoint.get("time_dim", 128))
-    n_steps = int(checkpoint.get("n_steps", 1000))
-
-    model = UNet(
-        in_channels=1,
-        out_channels=1,
-        base_dim=base_dim,
-        time_dim=time_dim,
-        residual=True,
-        kernel_sizes=[3, 3, 3],
-        strides=[2, 2, 2],
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-    for param in model.parameters():
-        param.requires_grad = False
-
-    betas = torch.linspace(latent_consistency_DDPM_BETA_START, latent_consistency_DDPM_BETA_END, n_steps, device=device)
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)
-    noise_std_schedule = torch.sqrt(1.0 - alphas_cumprod)
-    return model, noise_std_schedule
-
-
-def latent_consistency_flatten_latent(z: torch.Tensor) -> torch.Tensor:
-    if z.ndim == 2:
-        return z
-    if z.ndim >= 3:
-        return z.flatten(start_dim=1)
-    raise ValueError(f"Unexpected latent shape: {tuple(z.shape)}")
-
-
-def latent_consistency_sample_sigma(batch_size: int, device: torch.device) -> torch.Tensor:
-    return torch.empty(batch_size, 1, 1, 1, device=device).uniform_(latent_consistency_SIGMA_MIN, latent_consistency_SIGMA_MAX)
-
-
-def latent_consistency_sigma_to_t(sigma_flat: torch.Tensor, noise_std_schedule: torch.Tensor) -> torch.Tensor:
-    sigma = sigma_flat.detach().clamp(float(noise_std_schedule[0]), float(noise_std_schedule[-1]))
-    idx = torch.searchsorted(noise_std_schedule, sigma)
-    idx = idx.clamp(0, noise_std_schedule.shape[0] - 1)
-    prev_idx = (idx - 1).clamp(0, noise_std_schedule.shape[0] - 1)
-
-    cur_err = (noise_std_schedule[idx] - sigma).abs()
-    prev_err = (noise_std_schedule[prev_idx] - sigma).abs()
-    choose_prev = prev_err < cur_err
-    return torch.where(choose_prev, prev_idx, idx).long()
-
-
-def latent_consistency_save_scatter(df: pd.DataFrame, score_col: str, output_path: Path) -> None:
-    plt.figure(figsize=(7, 5))
-    plt.scatter(df["sigma"], df[score_col], s=8, alpha=0.25)
-    plt.xlabel("sigma")
-    plt.ylabel(score_col)
-    plt.title(f"sigma vs {score_col}")
-    plt.grid(True, alpha=0.2)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=180)
-    plt.close()
-
-
-def latent_consistency_save_binned(bin_centers: np.ndarray, bin_means: np.ndarray, score_label: str, output_path: Path) -> None:
-    plt.figure(figsize=(7, 5))
-    plt.plot(bin_centers, bin_means, marker="o")
-    plt.xlabel("sigma bin center")
-    plt.ylabel(f"mean({score_label})")
-    plt.title(f"Mean {score_label} by sigma bin")
-    plt.grid(True, alpha=0.2)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=180)
-    plt.close()
-
-
-def latent_consistency_main() -> None:
-    latent_consistency_set_seed(latent_consistency_SEED)
-    latent_consistency_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loader = latent_consistency_build_loader()
-    ae = latent_consistency_load_autoencoder(device)
-    ddpm_model, noise_std_schedule = latent_consistency_load_ddpm_model(device)
-
-    sigma_all: list[np.ndarray] = []
-    score_a_all: list[np.ndarray] = []
-    score_b_all: list[np.ndarray] = []
-
-    with torch.no_grad():
-        for x, _ in loader:
-            x = x.to(device)
-            sigma = latent_consistency_sample_sigma(x.shape[0], device)
-            sigma_flat = sigma.view(-1)
-            t = latent_consistency_sigma_to_t(sigma_flat, noise_std_schedule)
-
-            z = latent_consistency_flatten_latent(ae.encode(x))
-
-            # Mode A: synthetic latent noise
-            epsilon_z = torch.randn_like(z)
-            z_noisy_a = z + sigma_flat.view(-1, 1) * epsilon_z
-            x_noisy_a = ae.decode(z_noisy_a)
-            x_noisy_a = x_noisy_a * 2.0 - 1.0
-            eps_pred_a = ddpm_model(x_noisy_a, t)
-            score_a = eps_pred_a.flatten(start_dim=1).pow(2).sum(dim=1)
-
-            # Mode B: encoded pixel noise
-            epsilon_x = torch.randn_like(x)
-            x_noisy = x + sigma * epsilon_x
-            z_noisy_b = latent_consistency_flatten_latent(ae.encode(x_noisy))
-            x_noisy_b = ae.decode(z_noisy_b)
-            x_noisy_b = x_noisy_b * 2.0 - 1.0
-            eps_pred_b = ddpm_model(x_noisy_b, t)
-            score_b = eps_pred_b.flatten(start_dim=1).pow(2).sum(dim=1)
-
-            sigma_all.append(sigma_flat.cpu().numpy().astype(np.float32))
-            score_a_all.append(score_a.cpu().numpy().astype(np.float32))
-            score_b_all.append(score_b.cpu().numpy().astype(np.float32))
-
-    sigma_np = np.concatenate(sigma_all, axis=0)
-    score_a_np = np.concatenate(score_a_all, axis=0)
-    score_b_np = np.concatenate(score_b_all, axis=0)
-
-    pearson_a = float(pd.Series(score_a_np).corr(pd.Series(sigma_np ** 2), method="pearson"))
-    spearman_a = float(pd.Series(score_a_np).corr(pd.Series(sigma_np), method="spearman"))
-    pearson_b = float(pd.Series(score_b_np).corr(pd.Series(sigma_np ** 2), method="pearson"))
-    spearman_b = float(pd.Series(score_b_np).corr(pd.Series(sigma_np), method="spearman"))
-
-    bin_edges = np.linspace(latent_consistency_SIGMA_MIN, latent_consistency_SIGMA_MAX, latent_consistency_NUM_BINS + 1)
-    bin_indices = np.clip(np.digitize(sigma_np, bin_edges) - 1, 0, latent_consistency_NUM_BINS - 1)
-    bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    bin_means_a = np.array(
-        [float(score_a_np[bin_indices == i].mean()) if np.any(bin_indices == i) else float("nan") for i in range(latent_consistency_NUM_BINS)],
-        dtype=np.float32,
-    )
-    bin_means_b = np.array(
-        [float(score_b_np[bin_indices == i].mean()) if np.any(bin_indices == i) else float("nan") for i in range(latent_consistency_NUM_BINS)],
-        dtype=np.float32,
-    )
-
-    df = pd.DataFrame(
-        {
-            "sigma": sigma_np.astype(np.float32),
-            "score_A": score_a_np.astype(np.float32),
-            "score_B": score_b_np.astype(np.float32),
-        }
-    )
-    df.to_csv(latent_consistency_CSV_PATH, index=False)
-
-    latent_consistency_save_scatter(df, "score_A", latent_consistency_SCATTER_A_PATH)
-    latent_consistency_save_scatter(df, "score_B", latent_consistency_SCATTER_B_PATH)
-    latent_consistency_save_binned(bin_centers, bin_means_a, "score_A", latent_consistency_BINNED_A_PATH)
-    latent_consistency_save_binned(bin_centers, bin_means_b, "score_B", latent_consistency_BINNED_B_PATH)
-
-    metrics = {
-        "A": {
-            "pearson": pearson_a,
-            "spearman": spearman_a,
-        },
-        "B": {
-            "pearson": pearson_b,
-            "spearman": spearman_b,
-        },
-        "sigma_bin_edges": bin_edges.tolist(),
-        "sigma_bin_centers": bin_centers.tolist(),
-        "mean_score_A_per_bin": bin_means_a.tolist(),
-        "mean_score_B_per_bin": bin_means_b.tolist(),
-        "num_samples": int(df.shape[0]),
-    }
-    latent_consistency_METRICS_PATH.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-
-    print(f"metrics_path={latent_consistency_METRICS_PATH}")
-    print(f"csv_path={latent_consistency_CSV_PATH}")
-    print(f"A_pearson={pearson_a:.6f}")
-    print(f"A_spearman={spearman_a:.6f}")
-    print(f"B_pearson={pearson_b:.6f}")
-    print(f"B_spearman={spearman_b:.6f}")
 
 
 if __name__ == "__main__":

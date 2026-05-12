@@ -1,19 +1,29 @@
-
-# Создается директория под каждый project.id
+# Keep Hydra from creating separate experiment output folders
 run:
-    dir: ./experiments/${project.id}
+    dir: .
 
 sweep:
     dir: ./experiments_multirun
     subdir: ${hydra.job.override_dirname}
-    
-output_subdir: configs_dump 
+
+# Do not dump Hydra configs into the project tree
+output_subdir: null
 
 job:
-    chdir: True
+    chdir: False
 
+# Training scripts attach their own file logger inside the run output directory
 job_logging:
+    version: 1
+    formatters:
+      simple:
+        format: "[%(asctime)s][%(name)s][%(levelname)s] - %(message)s"
     handlers:
-      file:
-        filename: ${logName}.log
-        encoding: utf-8
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        stream: ext://sys.stdout
+    root:
+      level: INFO
+      handlers: [console]
+    disable_existing_loggers: false

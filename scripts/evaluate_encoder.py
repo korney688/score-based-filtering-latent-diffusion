@@ -23,7 +23,7 @@ def main() -> None:
         "mode",
         nargs="?",
         default="compare-encoders",
-        choices=["compare-encoders", "noise-geometry", "score-validation", "latent-consistency", "all"],
+        choices=["compare-encoders", "noise-geometry", "score-validation", "all"],
     )
     args, forwarded_args = parser.parse_known_args()
 
@@ -37,11 +37,7 @@ def main() -> None:
 
         run_with_forwarded_args(encoder_validation.noise_geometry_main, forwarded_args)
 
-    # Stage 2: validate whether latent DDPM score is meaningful for selected encoders
-    if args.mode in {"latent-consistency", "all"}:
-        from src.evaluation import encoder_score_validation
-
-        run_with_forwarded_args(encoder_score_validation.latent_consistency_main, forwarded_args)
+    # Stage 1: validate whether DDPM score behavior is useful for encoder selection
     if args.mode in {"score-validation", "all"}:
         from src.evaluation import encoder_score_validation
 

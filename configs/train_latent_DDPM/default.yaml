@@ -3,43 +3,52 @@ defaults:
 
 seed: 42
 
-# train noisy dataset
-# dataset_path: "./data/dataset_noisy/dataset_noisy.h5"
-dataset_path: "./data/dataset_clean_mnist/dataset_clean_mnist.h5"
+# Train dataset
+dataset_source: mnist
 
-# Папка, куда сохранится обученная модель
+# Used only when dataset_source=h5
+h5_dataset:
+    path: null
+    apply_log: True
+    apply_norm: True
+    apply_split: True
+
+# Output folder for this DDPM training run
 id_label: ''
-output_dir: "./models/DDPM_model${.id_label}"
+output_dir: "${hydra:runtime.cwd}/outputs/ddpm/latent_ddpm_${.latent_noise_mode}_${.autoencoder_kind}_${.dataset_source}${.id_label}"
+
+# Stage 2 A/B protocol
+# baseline: z_noisy = z + sigma * eps_z
+# induced:  z_noisy = E(x + sigma * eps_x)
+latent_noise_mode: baseline
+
+# Frozen encoder selected after Stage 1 encoder validation
+autoencoder_kind: noise_consistency
+autoencoder_checkpoint_path: "./models/autoencoders/ae_noise_consistency_mnist/autoencoder_checkpoint.pt"
 
 # Dataloader
 batch_size: 32
 num_workers: 4
 in_memory: True
 
-# Параметры DDPM
+# DDPM parameters
 DDPM_params:
-    base_dim: 16 
-    deep: 3 # Максимум 3
-    apply_log: True
-    apply_norm: True
-    apply_split: True
+    base_dim: 16
+    deep: 3 # maximum 3
 
-# train loop
+# Train loop
 lr: 1e-4
 n_epochs: 30
 patience: 10
 grad_clip_val: 100000
-sheduler_mode: '-'  # ['warmup', 'cos', 'comb', 'plateau', None]
+scheduler_mode: null  # ['warmup', 'cos', 'comb', 'plateau', null]
 
-
-
-# Параметры для sheduler_mode = 'plateau'
+# Parameters for scheduler_mode = 'plateau'
 plateau_params:
     patience: 5
     threshold: 0.001
     factor: 0.8
 warmup_params:
-    threshold: 0.1 #10%
-
+    threshold: 0.1 # 10%
 
 save_interval: 'last_only'

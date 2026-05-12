@@ -18,3 +18,10 @@ Examples:
 - `tdncnn_filtering_topk40_v1.pth`
 
 Do not store exploratory plots or metric dumps here.
+
+Selected encoder: ae_noise_consistency_mnist
+Source run: outputs/ae_noise_consistency_mnist
+Required files:
+- autoencoder_checkpoint.pt
+- E.pt
+

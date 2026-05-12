@@ -1,34 +1,10 @@
-Final Project Tree
+# Final Project Tree
 
-Generated after controlled cleanup and archival.
-
-Long-running outputs, model checkpoints, experiment artifacts, `.venv`, `.git`, `.idea`, and `__pycache__` are omitted from this tree.
+Generated after validation cleanup. Long-running outputs, model checkpoints, experiment artifacts, `.venv`, `.git`, `.idea`, and `__pycache__` are omitted.
 
 ```text
 archive_legacy/
-  scripts/
-    evaluation_pipe.py
-    train_TDnCNN_example.py
-
 archive_unused/
-  notebooks/
-    Gap_dynamics/
-      tools_v3.py
-  scripts/
-    analyze_filtering.py
-    analyze_latent_noise.py
-    analyze_latent_noise_mismatch.py
-    ddpm_baseline_mnist.py
-    ddpm_baseline_score_analysis.py
-    latent_score_calibration.py
-    quick_encoder_score_comparison.py
-    sanity_check_score.py
-    score_analysis_mnist.py
-  src/
-    inference_ddpm_image.py
-    make_mnist_noisy_h5.py
-    train_autoencoder.py
-  cleanup_report.md
 
 configs/
   config.yaml
@@ -63,21 +39,12 @@ models/
 
 notebooks/
   Evaluation_pipe/
-    main.ipynb
   Gap_dynamics/
-    main.ipynb
-    new/
-      TDnCNN_model_filtered_QQ_spread_10.csv
-      TDnCNN_model_filtered_QQ_spread_50.csv
-      TDnCNN_model_filtered_random_10.csv
-      TDnCNN_model_filtered_top_k_10_16.csv
-      TDnCNN_model_filtered_top_k_50.csv
-      TDnCNN_model_v2.csv
 
 scripts/
   evaluate_encoder.py
+  evaluate_latent_ddpm_score.py
   evaluate_pipeline.py
-  evaluate_score.py
   filter_dataset.py
   internal/
     __init__.py
@@ -112,27 +79,17 @@ src/
     encoder_score_validation.py
     encoder_validation.py
     filtering_evaluation.py
+    latent_ddpm_score_validation.py
     score_calibration.py
-    score_validation.py
 
 outputs/
   README.md
-  final_results/
-    filtering/
-      README.md
-      qq/
-      topk/
-  debug/
-    filtering/
-      README.md
-  temporary/
-    filtering/
-      README.md
 
 ACTIVE_ENTRYPOINTS.md
 ACTIVE_FILES.md
 FINAL_PROJECT_TREE.md
 FINAL_PIPELINE.md
+STAGE2_AB_VALIDATION_AUDIT.md
 protocol_exp.docx
 README.md
 requirements.txt
@@ -141,6 +98,5 @@ Dockerfile
 
 ## Notes
 
-- `archive_legacy/` preserves old wireless / Quadriga / complex-signal / TDnCNN 3D entry scripts that still existed in the working tree.
-- `archive_unused/` preserves unused exploratory and obsolete scripts instead of deleting them.
-- `src/` contains code and reusable modules only; generated filtering artifacts live under `outputs/`.
+- `scripts/evaluate_latent_ddpm_score.py` is the only active entrypoint for frozen-encoder latent-DDPM score validation.
+- `src/evaluation/encoder_score_validation.py` belongs to Stage 1 encoder comparison, not the final frozen-encoder DDPM validation.

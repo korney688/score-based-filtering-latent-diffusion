@@ -121,7 +121,6 @@ def load_baseline_ddpm(
         out_channels=1,
         base_dim=base_dim,
         time_dim=time_dim,
-        residual=True,
         kernel_sizes=[3, 3, 3],
         strides=[2, 2, 2],
     ).to(device)
