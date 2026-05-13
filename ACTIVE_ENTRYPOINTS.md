@@ -90,12 +90,25 @@ Outputs:
 
 - `scripts/train_tdncnn.py`
 
+Modes:
+
+- `python scripts/train_tdncnn.py --run full`
+- `python scripts/train_tdncnn.py --run baseline_topk_10`
+- `python scripts/train_tdncnn.py --run induced_topk_10`
+- `python scripts/train_tdncnn.py --run baseline_quantile_q0_q10`
+- `python scripts/train_tdncnn.py --run induced_quantile_q0_q10`
+
 Implementation:
 
 - `scripts/internal/run_TDnCNN_image_suite.py`
+- `scripts/internal/tdncnn_image_runs_config.py`
 - `scripts/internal/train_TDnCNN_image.py`
 - `src/TDnCNN_image.py`
 - `src/tdncnn_datasets.py`
+
+Outputs:
+
+- `experiments/exp_006_tdncnn/<run>/`
 
 ## Hydra Status
 

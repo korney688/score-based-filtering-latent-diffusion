@@ -53,9 +53,26 @@ def prepare_for_fid(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
+def module_device(module: nn.Module) -> torch.device:
+    return next(module.parameters()).device
+
+
+def align_lpips_scaling_layer(lpips_model: nn.Module, device: torch.device) -> None:
+    # Some LPIPS versions keep scaling tensors as plain attributes, so .to(device) misses them.
+    scaling_layer = getattr(lpips_model, "scaling_layer", None)
+    if scaling_layer is None:
+        return
+    if hasattr(scaling_layer, "shift"):
+        scaling_layer.shift = scaling_layer.shift.to(device)
+    if hasattr(scaling_layer, "scale"):
+        scaling_layer.scale = scaling_layer.scale.to(device)
+
+
 def compute_lpips(x_pred: torch.Tensor, x_true: torch.Tensor, lpips_model: nn.Module) -> float:
-    pred_lpips = prepare_for_lpips(x_pred)
-    true_lpips = prepare_for_lpips(x_true)
+    device = module_device(lpips_model)
+    align_lpips_scaling_layer(lpips_model, device)
+    pred_lpips = prepare_for_lpips(x_pred.to(device))
+    true_lpips = prepare_for_lpips(x_true.to(device))
     value = lpips_model(pred_lpips, true_lpips)
     return float(value.mean().item())
 

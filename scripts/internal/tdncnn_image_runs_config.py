@@ -1,59 +1,50 @@
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+FILTERING_ROOT = PROJECT_ROOT / "experiments" / "exp_005_filtering"
 
 TRAIN_CONFIG = {
-    "clean_path": PROJECT_ROOT / "experiments" / "exp_001" / "data" / "dataset_clean_mnist" / "dataset_clean_mnist.h5",
-    "noisy_path": PROJECT_ROOT / "experiments" / "exp_001" / "data" / "dataset_noisy_var" / "dataset_noisy_var.h5",
-    "output_root": PROJECT_ROOT / "models" / "tdncnn_image_suite",
+    "data_root": PROJECT_ROOT / "data",
+    "output_root": PROJECT_ROOT / "experiments" / "exp_006_tdncnn",
     "batch_size": 32,
-    "split": 0.8,
     "epochs": 15,
     "lr": 1e-3,
     "seed": 42,
+    "sigma_min": 0.1,
+    "sigma_max": 0.8,
+    "num_workers": 0,
     "runs": [
         {
-            "experiment_name": "baseline_all",
-            "mode": "baseline",
+            "experiment_name": "full",
+            "mode": "full",
             "filtered_indices_path": None,
-            "output_dir_name": "baseline_all",
+            "output_dir_name": "full",
         },
         {
-            "experiment_name": "topk_20pct",
+            "experiment_name": "baseline_topk_10",
             "mode": "filtered",
-            "filtered_indices_path": PROJECT_ROOT / "outputs" / "final_results" / "filtering" / "topk" / "filtered_dataset_topk_20pct.h5",
-            "output_dir_name": "topk_20pct",
+            "filtered_indices_path": FILTERING_ROOT / "baseline" / "top_k_0.1" / "selected_indices.npy",
+            "output_dir_name": "baseline_topk_10",
         },
         {
-            "experiment_name": "topk_40pct",
+            "experiment_name": "induced_topk_10",
             "mode": "filtered",
-            "filtered_indices_path": PROJECT_ROOT / "outputs" / "final_results" / "filtering" / "topk" / "filtered_dataset_topk_40pct.h5",
-            "output_dir_name": "topk_40pct",
+            "filtered_indices_path": FILTERING_ROOT / "induced" / "top_k_0.1" / "selected_indices.npy",
+            "output_dir_name": "induced_topk_10",
         },
         {
-            "experiment_name": "topk_60pct",
+            "experiment_name": "baseline_quantile_q0_q10",
             "mode": "filtered",
-            "filtered_indices_path": PROJECT_ROOT / "outputs" / "final_results" / "filtering" / "topk" / "filtered_dataset_topk_60pct.h5",
-            "output_dir_name": "topk_60pct",
+            "filtered_indices_path": FILTERING_ROOT / "baseline" / "quantile_0_0.1" / "selected_indices.npy",
+            "output_dir_name": "baseline_quantile_q0_q10",
         },
         {
-            "experiment_name": "qq_upper_80_100",
+            "experiment_name": "induced_quantile_q0_q10",
             "mode": "filtered",
-            "filtered_indices_path": PROJECT_ROOT / "outputs" / "final_results" / "filtering" / "qq" / "filtered_dataset_qq_upper_80_100.h5",
-            "output_dir_name": "qq_upper_80_100",
-        },
-        {
-            "experiment_name": "qq_upper_60_100",
-            "mode": "filtered",
-            "filtered_indices_path": PROJECT_ROOT / "outputs" / "final_results" / "filtering" / "qq" / "filtered_dataset_qq_upper_60_100.h5",
-            "output_dir_name": "qq_upper_60_100",
-        },
-        {
-            "experiment_name": "qq_upper_40_100",
-            "mode": "filtered",
-            "filtered_indices_path": PROJECT_ROOT / "outputs" / "final_results" / "filtering" / "qq" / "filtered_dataset_qq_upper_40_100.h5",
-            "output_dir_name": "qq_upper_40_100",
+            "filtered_indices_path": FILTERING_ROOT / "induced" / "quantile_0_0.1" / "selected_indices.npy",
+            "output_dir_name": "induced_quantile_q0_q10",
         },
     ],
 }

@@ -1,4 +1,5 @@
 import csv
+import json
 from pathlib import Path
 from urllib.error import URLError
 
@@ -122,29 +123,35 @@ def save_metrics_table(history: dict[str, list[float]], output_path: Path) -> No
 def run_experiment(
     experiment_name: str,
     mode: str,
-    clean_path: Path,
-    noisy_path: Path,
     filtered_indices_path: Path | None,
     output_dir: Path,
+    data_root: Path,
     batch_size: int = 32,
-    split: float = 0.8,
     epochs: int = 15,
     lr: float = 1e-3,
     seed: int = 42,
+    sigma_min: float = 0.1,
+    sigma_max: float = 0.8,
+    num_workers: int = 0,
 ) -> dict[str, object]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.manual_seed(seed)
+    if device.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     results_dir = output_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
     train_loader, test_loader = create_dataloaders(
-        clean_path=clean_path,
-        noisy_path=noisy_path,
         filtered_indices=filtered_indices_path,
         batch_size=batch_size,
-        split=split,
         mode=mode,
         seed=seed,
+        data_root=data_root,
+        sigma_min=sigma_min,
+        sigma_max=sigma_max,
+        num_workers=num_workers,
     )
 
     model = DnCNN_2D().to(device)
@@ -189,10 +196,27 @@ def run_experiment(
             f"fid={val_metrics['fid']:.4f}"
         )
 
+    torch.save(model.state_dict(), output_dir / f"{experiment_name}.pth")
+    print(f"[{experiment_name}] saved checkpoint: {output_dir / f'{experiment_name}.pth'}")
+
     final_metrics = compute_metrics(sample_pred, sample_clean, lpips_model)
     print(f"[{experiment_name}] final sample metrics: {final_metrics}")
 
-    torch.save(model.state_dict(), output_dir / f"{experiment_name}.pth")
+    run_config = {
+        "experiment_name": experiment_name,
+        "mode": mode,
+        "filtered_indices_path": str(filtered_indices_path) if filtered_indices_path is not None else None,
+        "data_root": str(data_root),
+        "batch_size": batch_size,
+        "epochs": epochs,
+        "lr": lr,
+        "seed": seed,
+        "sigma_min": sigma_min,
+        "sigma_max": sigma_max,
+        "num_workers": num_workers,
+    }
+    (output_dir / "config.json").write_text(json.dumps(run_config, indent=2), encoding="utf-8")
+    (output_dir / "metrics.json").write_text(json.dumps(final_metrics, indent=2), encoding="utf-8")
     save_visualization(
         sample_noisy,
         sample_clean,

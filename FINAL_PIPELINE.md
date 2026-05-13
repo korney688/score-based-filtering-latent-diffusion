@@ -181,23 +181,52 @@ Outputs:
 
 - `experiments/exp_005_filtering/<branch>/<mode>/scores.csv`
 - `experiments/exp_005_filtering/<branch>/<mode>/selected_indices.npy`
+- `experiments/exp_005_filtering/<branch>/<mode>/best_noisy_grid.png`
+- `experiments/exp_005_filtering/<branch>/<mode>/worst_noisy_grid.png`
+- `experiments/exp_005_filtering/<branch>/<mode>/best_clean_noisy_grid.png`
+- `experiments/exp_005_filtering/<branch>/<mode>/worst_clean_noisy_grid.png`
+- `experiments/exp_005_filtering/<branch>/<mode>/best_samples_grid.png`
+- `experiments/exp_005_filtering/<branch>/<mode>/worst_samples_grid.png`
+- `experiments/exp_005_filtering/<branch>/<mode>/selected_samples_grid.png`
+- `experiments/exp_005_filtering/<branch>/<mode>/rejected_samples_grid.png`
 - `experiments/exp_005_filtering/<branch>/<mode>/config.yaml`
 - `experiments/exp_005_filtering/<branch>/<mode>/metadata.json`
 
 ## 7. TDnCNN Downstream Validation
 
-Training suite entrypoint:
+TDnCNN uses torchvision MNIST directly. Training noise is generated online, and Stage 3 `selected_indices.npy` files affect only the MNIST train split. The MNIST test split is never filtered.
+
+Run all configured downstream experiments:
 
 ```bash
 python scripts/train_tdncnn.py
 ```
 
+Run one downstream experiment:
+
+```bash
+python scripts/train_tdncnn.py --run full
+python scripts/train_tdncnn.py --run baseline_topk_10
+python scripts/train_tdncnn.py --run induced_topk_10
+python scripts/train_tdncnn.py --run baseline_quantile_q0_q10
+python scripts/train_tdncnn.py --run induced_quantile_q0_q10
+```
+
 Implementation:
 
 - `scripts/internal/run_TDnCNN_image_suite.py`
+- `scripts/internal/tdncnn_image_runs_config.py`
 - `scripts/internal/train_TDnCNN_image.py`
 - `src/TDnCNN_image.py`
 - `src/tdncnn_datasets.py`
+
+Outputs:
+
+- `experiments/exp_006_tdncnn/full`
+- `experiments/exp_006_tdncnn/baseline_topk_10`
+- `experiments/exp_006_tdncnn/induced_topk_10`
+- `experiments/exp_006_tdncnn/baseline_quantile_q0_q10`
+- `experiments/exp_006_tdncnn/induced_quantile_q0_q10`
 
 ## Hydra Status
 
