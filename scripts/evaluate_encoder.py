@@ -27,15 +27,10 @@ def main() -> None:
     )
     args, forwarded_args = parser.parse_known_args()
 
+    from src.evaluation import encoder_validation
+
     # Stage 1: compare reconstruction quality and latent noise geometry across encoders
-    if args.mode in {"compare-encoders", "all"}:
-        from src.evaluation import encoder_validation
-
-        run_with_forwarded_args(encoder_validation.main, forwarded_args)
-    if args.mode in {"noise-geometry", "all"}:
-        from src.evaluation import encoder_validation
-
-        run_with_forwarded_args(encoder_validation.noise_geometry_main, forwarded_args)
+    run_with_forwarded_args(encoder_validation.main, ["--mode", args.mode, *forwarded_args])
 
 
 if __name__ == "__main__":

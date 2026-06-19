@@ -1,0 +1,59 @@
+defaults:
+  - _self_
+
+slug: imagenet100
+name: ImageNet-100
+dataset_type: imagefolder
+torchvision_name: ImageFolder
+channels: 3
+in_channels: 3
+out_channels: 3
+image_size: 64
+num_classes: 100
+mean: [0.5, 0.5, 0.5]
+std: [0.5, 0.5, 0.5]
+download: false
+folder_name: imagenet100
+local_root: null
+
+encoder:
+  selected_type: noise_consistency
+  selected_variant: large
+  name: noise_consistency_large
+  latent_dim: 256
+  checkpoint_run: noise_consistency_large_latent256
+  checkpoint_path: ${dataset.paths.autoencoder_root}/noise_consistency_large_latent256/autoencoder_checkpoint.pt
+
+encoder_validation:
+  candidates:
+    noise_consistency:
+      kind: noise_consistency
+      architecture: noise_consistency_large
+      latent_dim: 256
+      checkpoint_run: noise_consistency_large_latent256
+
+latent_ddpm:
+  runs:
+    baseline:
+      latent_noise_mode: baseline
+      checkpoint_run: latent_ddpm_baseline_ae_noise_consistency_imagenet100
+    induced:
+      latent_noise_mode: induced
+      checkpoint_run: latent_ddpm_induced_ae_noise_consistency_imagenet100
+
+latent_ddpm_validation:
+  runs:
+    baseline:
+      latent_noise_mode: baseline
+      checkpoint_run: latent_ddpm_baseline_ae_noise_consistency_imagenet100
+    induced:
+      latent_noise_mode: induced
+      checkpoint_run: latent_ddpm_induced_ae_noise_consistency_imagenet100
+
+paths:
+  data_root: ${hydra:runtime.cwd}/data
+  experiments_root: ${hydra:runtime.cwd}/experiments/${dataset.slug}
+  outputs_root: ${hydra:runtime.cwd}/outputs/${dataset.slug}
+  checkpoints_root: ${hydra:runtime.cwd}/checkpoints/${dataset.slug}
+  autoencoder_root: ${dataset.paths.checkpoints_root}/autoencoders
+  ddpm_root: ${dataset.paths.checkpoints_root}/ddpm

@@ -62,7 +62,7 @@ def compute_latent_ddpm_scores(
     sigma_max: float,
     visual_n_images: int = 10,
 ) -> tuple[pd.DataFrame, dict[str, list[dict]]]:
-    # Score every MNIST train sample with the Stage 2 definition: ||eps_pred||^2.
+    # Score every train sample with the Stage 2 definition: ||eps_pred||^2.
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -77,7 +77,7 @@ def compute_latent_ddpm_scores(
     visual_samples = {"best": [], "worst": []}
 
     with torch.no_grad():
-        for batch in tqdm(loader, desc="Scoring MNIST train"):
+        for batch in tqdm(loader, desc="Scoring train split"):
             x = batch[0] if isinstance(batch, (tuple, list)) else batch
             x = x.to(device)
             current_batch_size = x.shape[0]
@@ -117,7 +117,7 @@ def compute_latent_ddpm_scores(
             offset += current_batch_size
 
     score_table = pd.concat(rows, ignore_index=True)
-    log.info("Computed scores for %s MNIST train samples", len(score_table))
+    log.info("Computed scores for %s train samples", len(score_table))
     return score_table, visual_samples
 
 
@@ -131,7 +131,11 @@ def select_lowest_top_k(score_table: pd.DataFrame, keep_ratio: float) -> np.ndar
     return np.sort(selected)
 
 
-def select_quantile_range(score_table: pd.DataFrame, quantile_low: float, quantile_high: float) -> np.ndarray:
+def select_quantile_interval_legacy(
+    score_table: pd.DataFrame,
+    quantile_low: float,
+    quantile_high: float,
+) -> np.ndarray:
     # Keep samples whose scores fall inside an explicit score quantile interval.
     if not 0 <= quantile_low < quantile_high <= 1:
         raise ValueError(
@@ -145,22 +149,72 @@ def select_quantile_range(score_table: pd.DataFrame, quantile_low: float, quanti
     return np.sort(selected)
 
 
+def quantile_spread_num_bins(score_count: int, min_points_per_bin: int = 30) -> int:
+    if min_points_per_bin <= 0:
+        raise ValueError(f"min_points_per_bin must be positive, got {min_points_per_bin}")
+    return max(1, int(score_count) // int(min_points_per_bin))
+
+
+def select_quantile_spread(
+    score_table: pd.DataFrame,
+    keep_ratio: float,
+    min_points_per_bin: int = 30,
+    seed: int = 42,
+) -> np.ndarray:
+    # QQ-spread filtering: sample the same fraction inside score quantile bins.
+    if not 0 < keep_ratio <= 1:
+        raise ValueError(f"keep_ratio must be in (0, 1], got {keep_ratio}")
+    if score_table.empty:
+        raise ValueError("score_table must not be empty")
+    if "score" not in score_table.columns:
+        raise ValueError("score_table must contain a 'score' column")
+    if "dataset_index" not in score_table.columns:
+        raise ValueError("score_table must contain a 'dataset_index' column")
+
+    scores = score_table["score"].to_numpy()
+    dataset_indices = score_table["dataset_index"].to_numpy(dtype=np.int64)
+    num_bins = quantile_spread_num_bins(len(scores), min_points_per_bin)
+    bin_edges = np.percentile(scores, np.linspace(0, 100, num_bins + 1))
+    bin_ids = np.digitize(scores, bin_edges[1:-1], right=True)
+    rng = np.random.default_rng(seed)
+
+    selected: list[np.ndarray] = []
+    for bin_id in range(num_bins):
+        bin_positions = np.flatnonzero(bin_ids == bin_id)
+        if len(bin_positions) == 0:
+            continue
+        keep_count = max(1, int(keep_ratio * len(bin_positions)))
+        chosen_positions = rng.choice(bin_positions, size=keep_count, replace=False)
+        selected.append(dataset_indices[chosen_positions])
+
+    if not selected:
+        return np.asarray([], dtype=np.int64)
+    return np.sort(np.concatenate(selected).astype(np.int64, copy=False))
+
+
 def select_indices(
     score_table: pd.DataFrame,
     filter_mode: str,
     keep_ratio: float,
-    quantile_low: float,
-    quantile_high: float,
+    quantile_low: float | None = None,
+    quantile_high: float | None = None,
+    quantile_min_points_per_bin: int = 30,
+    quantile_seed: int = 42,
 ) -> np.ndarray:
     if filter_mode == "top_k":
         return select_lowest_top_k(score_table, keep_ratio)
     if filter_mode == "quantile":
-        return select_quantile_range(score_table, quantile_low, quantile_high)
+        return select_quantile_spread(
+            score_table=score_table,
+            keep_ratio=keep_ratio,
+            min_points_per_bin=quantile_min_points_per_bin,
+            seed=quantile_seed,
+        )
     raise ValueError(f"Unsupported filter_mode: {filter_mode}")
 
 
 def _load_clean_images(dataset, indices: np.ndarray) -> torch.Tensor:
-    # MNIST images are normalized to [-1, 1], so convert them back to [0, 1] for viewing.
+    # Images are normalized to [-1, 1], so convert them back to [0, 1] for viewing.
     images = []
     for dataset_index in indices:
         sample = dataset[int(dataset_index)]
@@ -243,7 +297,7 @@ def save_filtering_grids(
     output_dir: str | Path,
     n_images: int = 64,
 ) -> list[str]:
-    # Save clean MNIST examples for a quick visual check of the filtering result.
+    # Save clean examples for a quick visual check of the filtering result.
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

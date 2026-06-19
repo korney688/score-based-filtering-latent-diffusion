@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,19 +10,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 
 from src.DDPM_model import build_DDPM_model
+from src.dataset_registry import DATASET_SPECS, build_torchvision_split, dataset_name
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_ROOT = PROJECT_ROOT / "experiments" / "exp_003_aligned_latent_ddpm"
-DDPM_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "ddpm"
-# Stage 2 uses one fixed encoder selected after encoder validation
-AUTOENCODER_CHECKPOINT_PATH = (
-    PROJECT_ROOT / "models" / "autoencoders" / "ae_noise_consistency_mnist" / "autoencoder_checkpoint.pt"
-)
 
 BATCH_SIZE = 128
 NUM_SAMPLES = 2000
@@ -30,37 +26,42 @@ SIGMA_MIN = 0.1
 SIGMA_MAX = 0.8
 NUM_BINS = 10
 
-RUN_SPECS = {
-    # Compare two DDPMs trained with the same encoder but different latent noise modes
-    "baseline": {
-        "latent_noise_mode": "baseline",
-        "default_run_dir": DDPM_OUTPUT_ROOT / "latent_ddpm_baseline_ae_noise_consistency_mnist",
-    },
-    "induced": {
-        "latent_noise_mode": "induced",
-        "default_run_dir": DDPM_OUTPUT_ROOT / "latent_ddpm_induced_ae_noise_consistency_mnist",
-    },
-}
+
+@dataclass(frozen=True)
+class LatentDDPMValidationContext:
+    dataset_cfg: dict[str, Any]
+    dataset_slug: str
+    root: Path
+    metrics_dir: Path
+    score_validation_dir: Path
+    score_distributions_dir: Path
+    noise_prediction_dir: Path
+    covariance_dir: Path
+    report_dir: Path
+    autoencoder_checkpoint_path: Path
+
+
+@dataclass(frozen=True)
+class ModeOutputDirs:
+    metrics_path: Path
+    score_validation_dir: Path
+    score_distributions_dir: Path
+    noise_prediction_dir: Path
+    covariance_dir: Path
 
 
 def parse_args() -> argparse.Namespace:
-    # Allow rerunning the validation with another output folder or checkpoint folders
     parser = argparse.ArgumentParser(description="Stage 2 A/B latent-DDPM score validation")
-    parser.add_argument("--output-root", type=Path, default=OUTPUT_ROOT)
+    parser.add_argument("--dataset", default="mnist", choices=sorted(DATASET_SPECS))
+    parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--num-samples", type=int, default=NUM_SAMPLES)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--seed", type=int, default=SEED)
-    parser.add_argument(
-        "--baseline-run-dir",
-        type=Path,
-        default=RUN_SPECS["baseline"]["default_run_dir"],
-    )
-    parser.add_argument(
-        "--induced-run-dir",
-        type=Path,
-        default=RUN_SPECS["induced"]["default_run_dir"],
-    )
+    parser.add_argument("--modes", nargs="+", choices=["baseline", "induced"], default=None)
+    parser.add_argument("--baseline-run-dir", type=Path, default=None)
+    parser.add_argument("--induced-run-dir", type=Path, default=None)
+    parser.add_argument("--autoencoder-checkpoint-path", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -77,23 +78,126 @@ def resolve_device(device_arg: str | None) -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def build_loader(num_samples: int, batch_size: int) -> DataLoader:
-    # Use MNIST test images for validation; labels are ignored later
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
-        ]
+def load_dataset_config(slug: str) -> dict[str, Any]:
+    config_path = PROJECT_ROOT / "configs" / "dataset" / f"{slug}.yaml"
+    cfg = OmegaConf.load(config_path)
+    dataset_cfg = OmegaConf.to_container(cfg, resolve=False)
+    if not isinstance(dataset_cfg, dict):
+        raise TypeError(f"Dataset config must be a mapping: {config_path}")
+    return dataset_cfg
+
+
+def _cfg_get(cfg: Any | None, key: str, default: Any) -> Any:
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def default_autoencoder_checkpoint_path(dataset_cfg: dict[str, Any], dataset_slug: str) -> Path:
+    encoder_cfg = _cfg_get(dataset_cfg, "encoder", {})
+    checkpoint_run = _cfg_get(encoder_cfg, "checkpoint_run", None)
+    if checkpoint_run is None:
+        architecture = _cfg_get(encoder_cfg, "name", "noise_consistency_small")
+        latent_dim = int(_cfg_get(encoder_cfg, "latent_dim", 16))
+        checkpoint_run = f"{architecture}_latent{latent_dim}"
+    return PROJECT_ROOT / "checkpoints" / dataset_slug / "autoencoders" / str(checkpoint_run) / "autoencoder_checkpoint.pt"
+
+
+def build_context(args: argparse.Namespace) -> LatentDDPMValidationContext:
+    dataset_cfg = load_dataset_config(args.dataset)
+    slug = dataset_name(dataset_cfg)
+    root = args.output_root or PROJECT_ROOT / "experiments" / slug / "exp_003_latent_ddpm_validation"
+    autoencoder_checkpoint_path = args.autoencoder_checkpoint_path or default_autoencoder_checkpoint_path(dataset_cfg, slug)
+    return LatentDDPMValidationContext(
+        dataset_cfg=dataset_cfg,
+        dataset_slug=slug,
+        root=root,
+        metrics_dir=root / "metrics",
+        score_validation_dir=root / "score_validation",
+        score_distributions_dir=root / "score_distributions",
+        noise_prediction_dir=root / "noise_prediction",
+        covariance_dir=root / "covariance",
+        report_dir=root / "report",
+        autoencoder_checkpoint_path=autoencoder_checkpoint_path,
     )
-    dataset = datasets.MNIST(
-        root=str(PROJECT_ROOT / "data"),
+
+
+def ensure_context_dirs(context: LatentDDPMValidationContext) -> None:
+    for path in [
+        context.root,
+        context.metrics_dir,
+        context.score_validation_dir,
+        context.score_distributions_dir,
+        context.noise_prediction_dir,
+        context.covariance_dir,
+        context.report_dir,
+    ]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def build_loader(dataset_cfg: dict[str, Any], num_samples: int, batch_size: int) -> DataLoader:
+    dataset = build_torchvision_split(
+        dataset_cfg=dataset_cfg,
         train=False,
-        download=False,
-        transform=transform,
+        data_root=PROJECT_ROOT / "data",
+        transform_profile="normalized",
+        download=bool(dataset_cfg.get("download", False)),
     )
     subset_indices = np.arange(min(num_samples, len(dataset)), dtype=np.int64)
     subset = torch.utils.data.Subset(dataset, subset_indices.tolist())
     return DataLoader(subset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+
+def validation_run_specs(dataset_cfg: dict[str, Any], dataset_slug: str) -> dict[str, dict[str, Any]]:
+    validation_cfg = dataset_cfg.get("latent_ddpm_validation", {})
+    runs = validation_cfg.get("runs", {}) if isinstance(validation_cfg, dict) else {}
+    if isinstance(runs, dict) and runs:
+        return runs
+
+    ddpm_root = PROJECT_ROOT / "checkpoints" / dataset_slug / "ddpm"
+    return {
+        "baseline": {
+            "latent_noise_mode": "baseline",
+            "checkpoint_run": f"latent_ddpm_baseline_ae_noise_consistency_{dataset_slug}",
+            "default_run_dir": ddpm_root / f"latent_ddpm_baseline_ae_noise_consistency_{dataset_slug}",
+        },
+        "induced": {
+            "latent_noise_mode": "induced",
+            "checkpoint_run": f"latent_ddpm_induced_ae_noise_consistency_{dataset_slug}",
+            "default_run_dir": ddpm_root / f"latent_ddpm_induced_ae_noise_consistency_{dataset_slug}",
+        },
+    }
+
+
+def resolve_run_dir(context: LatentDDPMValidationContext, mode: str, spec: dict[str, Any], args: argparse.Namespace) -> Path:
+    override = args.baseline_run_dir if mode == "baseline" else args.induced_run_dir
+    if override is not None:
+        return override
+    if "run_dir" in spec:
+        return Path(str(spec["run_dir"]))
+    if "default_run_dir" in spec:
+        return Path(spec["default_run_dir"])
+    checkpoint_run = spec.get("checkpoint_run")
+    if checkpoint_run is None:
+        checkpoint_run = f"latent_ddpm_{mode}_ae_noise_consistency_{context.dataset_slug}"
+    return PROJECT_ROOT / "checkpoints" / context.dataset_slug / "ddpm" / str(checkpoint_run)
+
+
+def selected_run_specs(
+    context: LatentDDPMValidationContext,
+    args: argparse.Namespace,
+) -> dict[str, tuple[dict[str, Any], Path]]:
+    specs = validation_run_specs(context.dataset_cfg, context.dataset_slug)
+    modes = args.modes or list(specs.keys())
+    selected: dict[str, tuple[dict[str, Any], Path]] = {}
+    for mode in modes:
+        if mode not in specs:
+            raise ValueError(f"Missing latent-DDPM validation run spec for mode={mode}, dataset={context.dataset_slug}")
+        spec = specs[mode]
+        selected[mode] = (spec, resolve_run_dir(context, mode, spec, args))
+    return selected
 
 
 def latest_checkpoint_path(run_dir: Path) -> Path:
@@ -128,7 +232,24 @@ def load_training_metrics(run_dir: Path) -> dict[str, float | str]:
     }
 
 
-def load_stage2_model(mode: str, checkpoint_path: Path, device: torch.device):
+def resolve_autoencoder_checkpoint_from_ddpm_checkpoint(
+    checkpoint: dict[str, Any],
+    context: LatentDDPMValidationContext,
+) -> Path:
+    checkpoint_autoencoder_path = checkpoint.get("autoencoder_checkpoint_path")
+    if checkpoint_autoencoder_path:
+        candidate = Path(str(checkpoint_autoencoder_path))
+        if candidate.exists():
+            return candidate
+    return context.autoencoder_checkpoint_path
+
+
+def load_stage2_model(
+    mode: str,
+    checkpoint_path: Path,
+    context: LatentDDPMValidationContext,
+    device: torch.device,
+):
     # Rebuild the DDPM architecture and load only the trained UNet weights
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_mode = checkpoint.get("latent_noise_mode")
@@ -142,20 +263,22 @@ def load_stage2_model(mode: str, checkpoint_path: Path, device: torch.device):
     ddpm_params = checkpoint.get("DDPM_params", {})
     base_dim = int(ddpm_params.get("base_dim", 16))
     deep = int(ddpm_params.get("deep", 3))
+    autoencoder_checkpoint_path = resolve_autoencoder_checkpoint_from_ddpm_checkpoint(checkpoint, context)
 
     model = build_DDPM_model(
         base_dim=base_dim,
         deep=deep,
         device=str(device),
         latent_noise_mode=mode,
-        autoencoder_kind="noise_consistency",
-        autoencoder_checkpoint_path=AUTOENCODER_CHECKPOINT_PATH,
+        autoencoder_kind=checkpoint.get("autoencoder_kind", "noise_consistency"),
+        autoencoder_checkpoint_path=autoencoder_checkpoint_path,
+        dataset_cfg=context.dataset_cfg,
     )
     model.model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
-    return model
+    return model, autoencoder_checkpoint_path
 
 
 def sigma_to_t(model, sigma_flat: torch.Tensor) -> torch.Tensor:
@@ -223,6 +346,29 @@ def save_eigenvalues(eigvals: np.ndarray, output_path: Path, title: str) -> None
     plt.close()
 
 
+def save_covariance_heatmap(cov: np.ndarray, output_path: Path, title: str) -> None:
+    plt.figure(figsize=(6, 5))
+    plt.imshow(cov, cmap="viridis")
+    plt.colorbar(label="covariance")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
+def dataframe_to_markdown(df: pd.DataFrame) -> str:
+    columns = [str(col) for col in df.columns]
+    rows = [[str(value) for value in row] for row in df.to_numpy()]
+    widths = [
+        max([len(columns[idx]), *(len(row[idx]) for row in rows)] or [len(columns[idx])])
+        for idx in range(len(columns))
+    ]
+    header = "| " + " | ".join(columns[idx].ljust(widths[idx]) for idx in range(len(columns))) + " |"
+    separator = "| " + " | ".join("-" * widths[idx] for idx in range(len(columns))) + " |"
+    body = ["| " + " | ".join(row[idx].ljust(widths[idx]) for idx in range(len(columns))) + " |" for row in rows]
+    return "\n".join([header, separator, *body])
+
+
 def score_bin_stats(sigma: np.ndarray, score: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # Group score values by sigma intervals
     bin_edges = np.linspace(SIGMA_MIN, SIGMA_MAX, NUM_BINS + 1)
@@ -252,17 +398,34 @@ def covariance_diagnostics(target_noise: np.ndarray) -> dict[str, Any]:
     }
 
 
+def mode_output_dirs(context: LatentDDPMValidationContext, mode: str) -> ModeOutputDirs:
+    dirs = ModeOutputDirs(
+        metrics_path=context.metrics_dir / f"{mode}_metrics.json",
+        score_validation_dir=context.score_validation_dir / mode,
+        score_distributions_dir=context.score_distributions_dir / mode,
+        noise_prediction_dir=context.noise_prediction_dir / mode,
+        covariance_dir=context.covariance_dir / mode,
+    )
+    for path in [
+        dirs.score_validation_dir,
+        dirs.score_distributions_dir,
+        dirs.noise_prediction_dir,
+        dirs.covariance_dir,
+    ]:
+        path.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
 @torch.no_grad()
 def evaluate_mode(
     mode: str,
     model,
     loader: DataLoader,
     training_metrics: dict[str, float | str],
-    output_dir: Path,
+    outputs: ModeOutputDirs,
     device: torch.device,
 ) -> tuple[dict[str, Any], np.ndarray]:
     # Validate one DDPM mode: baseline or induced.
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     sigma_values: list[np.ndarray] = []
     score_values: list[np.ndarray] = []
@@ -313,16 +476,30 @@ def evaluate_mode(
             "target_noise_norm": np.linalg.norm(target_np, axis=1).astype(np.float32),
         }
     )
-    df.to_csv(output_dir / "score_samples.csv", index=False)
+    df.to_csv(outputs.score_validation_dir / "score_samples.csv", index=False)
 
     # Save per-mode plots and metrics.
-    save_scatter(df, "sigma", "score", output_dir / "score_vs_sigma.png", f"{mode}: score vs sigma")
-    save_hist(score_np, output_dir / "score_distribution.png", f"{mode}: score distribution", "score")
-    save_hist(df["target_noise_norm"].to_numpy(), output_dir / "target_noise_norm_distribution.png", f"{mode}: target noise norm", "||target_noise||")
-    save_binned_curve(bin_centers, bin_means, output_dir / "sigma_bins_mean_score.png", f"{mode}: mean score by sigma bin")
+    save_scatter(df, "sigma", "score", outputs.score_validation_dir / "score_vs_sigma.png", f"{mode}: score vs sigma")
+    save_hist(score_np, outputs.score_distributions_dir / "score_distribution.png", f"{mode}: score distribution", "score")
+    save_hist(
+        df["target_noise_norm"].to_numpy(),
+        outputs.noise_prediction_dir / "target_noise_norm_distribution.png",
+        f"{mode}: target noise norm",
+        "||target_noise||",
+    )
+    save_binned_curve(
+        bin_centers,
+        bin_means,
+        outputs.score_validation_dir / "sigma_bins_mean_score.png",
+        f"{mode}: mean score by sigma bin",
+    )
 
     cov_metrics = covariance_diagnostics(target_np)
-    save_eigenvalues(np.asarray(cov_metrics["covariance_eigenvalues"]), output_dir / "covariance_eigenvalues.png", f"{mode}: target covariance spectrum")
+    cov_matrix = np.asarray(cov_metrics["covariance_matrix"])
+    eigvals = np.asarray(cov_metrics["covariance_eigenvalues"])
+    np.savetxt(outputs.covariance_dir / "covariance_matrix.csv", cov_matrix, delimiter=",")
+    save_covariance_heatmap(cov_matrix, outputs.covariance_dir / "covariance_matrix.png", f"{mode}: target covariance")
+    save_eigenvalues(eigvals, outputs.covariance_dir / "covariance_eigenvalues.png", f"{mode}: target covariance spectrum")
 
     metrics = {
         "mode": mode,
@@ -343,7 +520,7 @@ def evaluate_mode(
         "covariance": cov_metrics,
         "num_samples": int(len(df)),
     }
-    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    outputs.metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     return metrics, target_np
 
 
@@ -394,10 +571,14 @@ def save_comparison_hist(a: np.ndarray, b: np.ndarray, output_path: Path, title:
 def write_comparison(
     mode_metrics: dict[str, dict[str, Any]],
     target_noise: dict[str, np.ndarray],
-    output_dir: Path,
-) -> None:
+    context: LatentDDPMValidationContext,
+) -> dict[str, Any] | None:
     # Compare the target-noise distributions of baseline and induced DDPMs
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not {"baseline", "induced"}.issubset(mode_metrics.keys()):
+        return None
+
+    comparison_dir = context.score_distributions_dir / "comparison"
+    comparison_dir.mkdir(parents=True, exist_ok=True)
 
     baseline_norm = np.linalg.norm(target_noise["baseline"], axis=1)
     induced_norm = np.linalg.norm(target_noise["induced"], axis=1)
@@ -423,85 +604,137 @@ def write_comparison(
         "baseline_normalized_best_val_loss": mode_metrics["baseline"]["normalized_best_val_loss"],
         "induced_normalized_best_val_loss": mode_metrics["induced"]["normalized_best_val_loss"],
     }
-    (output_dir / "distribution_diagnostics.json").write_text(json.dumps(comparison, indent=2), encoding="utf-8")
-    pd.DataFrame([comparison]).to_csv(output_dir / "comparison_metrics.csv", index=False)
+    (context.metrics_dir / "distribution_diagnostics.json").write_text(json.dumps(comparison, indent=2), encoding="utf-8")
+    pd.DataFrame([comparison]).to_csv(context.metrics_dir / "comparison_metrics.csv", index=False)
 
-    summary_df = pd.DataFrame(
-        # One compact comparison table with per-mode metrics and shared diagnostics
-        [
-            {
-                "mode": mode,
-                "raw_pearson_score_sigma": metrics["raw_pearson_score_sigma"],
-                "raw_spearman_score_sigma": metrics["raw_spearman_score_sigma"],
-                "target_noise_std": metrics["target_noise_std"],
-                "target_noise_mse_vs_zero": metrics["target_noise_mse_vs_zero"],
-                "recomputed_val_loss": metrics["recomputed_val_loss"],
-                "normalized_recomputed_val_loss": metrics["normalized_recomputed_val_loss"],
-                "best_val_loss": metrics["training_metrics"]["best_val_loss"],
-                "last_val_loss": metrics["training_metrics"]["last_val_loss"],
-                "normalized_best_val_loss": metrics["normalized_best_val_loss"],
-                "normalized_last_val_loss": metrics["normalized_last_val_loss"],
-                "covariance_min_eigenvalue": metrics["covariance"]["min_eigenvalue"],
-                "covariance_max_eigenvalue": metrics["covariance"]["max_eigenvalue"],
-                "covariance_anisotropy": metrics["covariance"]["anisotropy"],
-                "target_noise_norm_kl_baseline_to_induced": comparison["target_noise_norm_kl_baseline_to_induced"],
-                "target_noise_norm_kl_induced_to_baseline": comparison["target_noise_norm_kl_induced_to_baseline"],
-                "target_noise_norm_js_divergence": comparison["target_noise_norm_js_divergence"],
-                "target_noise_norm_wasserstein": comparison["target_noise_norm_wasserstein"],
-                "covariance_frobenius_distance": comparison["covariance_frobenius_distance"],
-                **{
-                    f"mean_score_sigma_bin_{idx + 1:02d}": value
-                    for idx, value in enumerate(metrics["mean_score_per_bin"])
-                },
-            }
-            for mode, metrics in mode_metrics.items()
-        ]
-    )
-    summary_df.to_csv(output_dir / "summary.csv", index=False)
     save_comparison_hist(
         baseline_norm,
         induced_norm,
-        output_dir / "target_noise_norm_comparison.png",
+        comparison_dir / "target_noise_norm_comparison.png",
         "Target noise norm distribution mismatch",
         "||target_noise||",
     )
+    return comparison
+
+
+def write_summary(
+    context: LatentDDPMValidationContext,
+    mode_metrics: dict[str, dict[str, Any]],
+    comparison: dict[str, Any] | None,
+    run_metadata: dict[str, dict[str, str]],
+) -> None:
+    rows = []
+    for mode, metrics in mode_metrics.items():
+        row = {
+            "dataset": context.dataset_slug,
+            "mode": mode,
+            "raw_pearson_score_sigma": metrics["raw_pearson_score_sigma"],
+            "raw_spearman_score_sigma": metrics["raw_spearman_score_sigma"],
+            "target_noise_std": metrics["target_noise_std"],
+            "target_noise_mse_vs_zero": metrics["target_noise_mse_vs_zero"],
+            "recomputed_val_loss": metrics["recomputed_val_loss"],
+            "normalized_recomputed_val_loss": metrics["normalized_recomputed_val_loss"],
+            "best_val_loss": metrics["training_metrics"]["best_val_loss"],
+            "last_val_loss": metrics["training_metrics"]["last_val_loss"],
+            "normalized_best_val_loss": metrics["normalized_best_val_loss"],
+            "normalized_last_val_loss": metrics["normalized_last_val_loss"],
+            "covariance_min_eigenvalue": metrics["covariance"]["min_eigenvalue"],
+            "covariance_max_eigenvalue": metrics["covariance"]["max_eigenvalue"],
+            "covariance_anisotropy": metrics["covariance"]["anisotropy"],
+            **{
+                f"mean_score_sigma_bin_{idx + 1:02d}": value
+                for idx, value in enumerate(metrics["mean_score_per_bin"])
+            },
+        }
+        if comparison is not None:
+            row.update(comparison)
+        rows.append(row)
+
+    summary_df = pd.DataFrame(rows)
+    summary_csv = context.metrics_dir / "summary.csv"
+    summary_df.to_csv(summary_csv, index=False)
+    summary_markdown = dataframe_to_markdown(summary_df)
+    (context.metrics_dir / "summary.md").write_text(summary_markdown + "\n", encoding="utf-8")
+
+    summary = {
+        "dataset": context.dataset_slug,
+        "root": str(context.root),
+        "autoencoder_checkpoint_path": str(context.autoencoder_checkpoint_path),
+        "modes": list(mode_metrics.keys()),
+        "runs": run_metadata,
+        "summary_csv": str(summary_csv),
+        "comparison_available": comparison is not None,
+    }
+    (context.root / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    report_lines = [
+        f"# Latent-DDPM Validation Summary: {context.dataset_slug}",
+        "",
+        "## Runs",
+    ]
+    for mode, metadata in run_metadata.items():
+        report_lines.extend(
+            [
+                f"- {mode}: {metadata['run_dir']}",
+                f"  checkpoint: {metadata['checkpoint_path']}",
+                f"  autoencoder: {metadata['autoencoder_checkpoint_path']}",
+            ]
+        )
+    report_lines.extend(["", "## Metrics", summary_markdown])
+    if comparison is None:
+        report_lines.extend(["", "Comparison diagnostics were not written because both baseline and induced modes were not selected."])
+    (context.report_dir / "latent_ddpm_validation_report.md").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
-    # Run both DDPM modes and write per-mode plus comparison outputs
+    # Run selected DDPM modes and write per-mode plus comparison outputs
     args = parse_args()
     set_seed(args.seed)
+    context = build_context(args)
+    ensure_context_dirs(context)
     device = resolve_device(args.device)
-    loader = build_loader(num_samples=args.num_samples, batch_size=args.batch_size)
-    run_dirs = {
-        "baseline": args.baseline_run_dir,
-        "induced": args.induced_run_dir,
-    }
+    loader = build_loader(context.dataset_cfg, num_samples=args.num_samples, batch_size=args.batch_size)
+    run_specs = selected_run_specs(context, args)
 
     mode_metrics: dict[str, dict[str, Any]] = {}
     target_noise: dict[str, np.ndarray] = {}
+    run_metadata: dict[str, dict[str, str]] = {}
 
-    for mode, spec in RUN_SPECS.items():
+    for mode, (spec, run_dir) in run_specs.items():
         # Load the trained checkpoint and evaluate this mode independently
-        run_dir = run_dirs[mode]
         checkpoint_path = latest_checkpoint_path(run_dir)
         training_metrics = load_training_metrics(run_dir)
-        model = load_stage2_model(mode=spec["latent_noise_mode"], checkpoint_path=checkpoint_path, device=device)
+        model, autoencoder_checkpoint_path = load_stage2_model(
+            mode=str(spec.get("latent_noise_mode", mode)),
+            checkpoint_path=checkpoint_path,
+            context=context,
+            device=device,
+        )
+        outputs = mode_output_dirs(context, mode)
         metrics, target_np = evaluate_mode(
             mode=mode,
             model=model,
             loader=loader,
             training_metrics=training_metrics,
-            output_dir=args.output_root / mode,
+            outputs=outputs,
             device=device,
         )
+        metrics["dataset"] = context.dataset_slug
+        metrics["run_dir"] = str(run_dir)
         metrics["checkpoint_path"] = str(checkpoint_path)
-        (args.output_root / mode / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+        metrics["autoencoder_checkpoint_path"] = str(autoencoder_checkpoint_path)
+        outputs.metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
         mode_metrics[mode] = metrics
         target_noise[mode] = target_np
+        run_metadata[mode] = {
+            "run_dir": str(run_dir),
+            "checkpoint_path": str(checkpoint_path),
+            "autoencoder_checkpoint_path": str(autoencoder_checkpoint_path),
+        }
 
-    write_comparison(mode_metrics, target_noise, args.output_root / "comparison")
-    print(f"latent_ddpm_score_validation_output={args.output_root}")
+    comparison = write_comparison(mode_metrics, target_noise, context)
+    write_summary(context, mode_metrics, comparison, run_metadata)
+    print(f"latent_ddpm_score_validation_output={context.root}")
 
 
 if __name__ == "__main__":

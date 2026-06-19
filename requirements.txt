@@ -1,10 +1,18 @@
+--extra-index-url https://download.pytorch.org/whl/cu118
+
 h5py
 matplotlib
-numpy
+numpy==1.26.4
 omegaconf
 pandas
 seaborn
-torch
-torchvision
+torch==2.7.1+cu118
+torchvision==0.22.1+cu118
 tqdm
 hydra-core
+huggingface_hub
+lpips==0.1.4
+pillow==12.2.0
+scikit-image==0.25.2
+torch-fidelity
+torchmetrics==0.11.4

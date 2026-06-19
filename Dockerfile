@@ -1,16 +1,36 @@
-FROM pytorch/pytorch:2.2.1-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.7.1-cuda11.8-cudnn9-runtime
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    MPLBACKEND=Agg \
+    PIP_NO_CACHE_DIR=1
 
-# Устанавливаем рабочую директорию
-WORKDIR /project
+WORKDIR /workspace
 
-# 1. Копируем ТОЛЬКО файл с зависимостями
-COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
+    curl \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    && rm -rf /var/lib/apt/lists/*
 
-# 2. Устанавливаем все тяжелые библиотеки
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt /workspace/requirements.txt
 
-# 3.
-ENTRYPOINT ["python", "scripts/main.py"]
+RUN python -m pip install --upgrade pip \
+    && python -m pip install -r requirements.txt
+
+COPY configs/ /workspace/configs/
+COPY scripts/ /workspace/scripts/
+COPY src/ /workspace/src/
+COPY docs/ /workspace/docs/
+COPY tests/ /workspace/tests/
+COPY README.md /workspace/README.md
+
+RUN mkdir -p /workspace/data /workspace/checkpoints /workspace/experiments /workspace/outputs /workspace/logs \
+    && python -m compileall -q scripts src
+
+CMD ["bash"]

@@ -3,10 +3,11 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
-from torchvision import datasets, transforms
+
+from src.dataset_registry import build_torchvision_split
 
 
-class OnlineNoisyMNIST(Dataset):
+class OnlineNoisyDataset(Dataset):
     def __init__(self, dataset: Dataset, sigma_min: float = 0.1, sigma_max: float = 0.8):
         self.dataset = dataset
         self.sigma_min = sigma_min
@@ -26,14 +27,30 @@ class OnlineNoisyMNIST(Dataset):
         return x_noisy.to(torch.float32), x_clean.to(torch.float32)
 
 
-def build_mnist_split(train: bool, data_root: str | Path) -> Dataset:
-    # TDnCNN works directly on clean MNIST images in [0, 1].
-    transform = transforms.ToTensor()
-    return datasets.MNIST(
-        root=Path(data_root),
+OnlineNoisyMNIST = OnlineNoisyDataset
+
+
+def limit_dataset(dataset: Dataset, max_samples: int | None) -> Dataset:
+    if max_samples is None:
+        return dataset
+    if max_samples <= 0:
+        raise ValueError(f"max_samples must be positive, got {max_samples}")
+    return Subset(dataset, list(range(min(max_samples, len(dataset)))))
+
+
+def build_dataset_split(
+    train: bool,
+    data_root: str | Path,
+    dataset_name: str = "mnist",
+    download: bool = False,
+) -> Dataset:
+    # TDnCNN works directly on clean images in [0, 1].
+    return build_torchvision_split(
+        dataset_cfg=dataset_name,
         train=train,
-        download=False,
-        transform=transform,
+        data_root=Path(data_root),
+        transform_profile="tensor",
+        download=download,
     )
 
 
@@ -62,16 +79,20 @@ def create_dataloaders(
     mode: str = "full",
     seed: int = 42,
     data_root: str | Path = "data",
+    dataset_name: str = "mnist",
+    download: bool = False,
     sigma_min: float = 0.1,
     sigma_max: float = 0.8,
     num_workers: int = 0,
+    max_train_samples: int | None = None,
+    max_test_samples: int | None = None,
 ):
     mode = mode.lower()
     if mode not in {"full", "filtered"}:
         raise ValueError(f"Unsupported mode: {mode}")
 
-    train_base = build_mnist_split(train=True, data_root=data_root)
-    test_base = build_mnist_split(train=False, data_root=data_root)
+    train_base = build_dataset_split(train=True, data_root=data_root, dataset_name=dataset_name, download=download)
+    test_base = build_dataset_split(train=False, data_root=data_root, dataset_name=dataset_name, download=download)
 
     loaded_filtered_indices = load_filtered_indices(filtered_indices)
     if mode == "filtered":
@@ -79,8 +100,11 @@ def create_dataloaders(
             raise ValueError("filtered_indices must be provided when mode='filtered'")
         train_base = Subset(train_base, np.sort(loaded_filtered_indices).tolist())
 
-    train_dataset = OnlineNoisyMNIST(train_base, sigma_min=sigma_min, sigma_max=sigma_max)
-    test_dataset = OnlineNoisyMNIST(test_base, sigma_min=sigma_min, sigma_max=sigma_max)
+    train_base = limit_dataset(train_base, max_train_samples)
+    test_base = limit_dataset(test_base, max_test_samples)
+
+    train_dataset = OnlineNoisyDataset(train_base, sigma_min=sigma_min, sigma_max=sigma_max)
+    test_dataset = OnlineNoisyDataset(test_base, sigma_min=sigma_min, sigma_max=sigma_max)
 
     generator = torch.Generator()
     generator.manual_seed(seed)

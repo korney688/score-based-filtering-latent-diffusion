@@ -1,30 +1,79 @@
+# Python caches
 __pycache__/
 *.py[cod]
-.ipynb_checkpoints/
-*.ipynb
-!notebooks/*.ipynb
-.idea/
-src/.idea/
-venv/
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments
 .venv/
+venv/
 env/
 .env
-data/*
-!data/README.md
-logs/
-experiments/*
-!experiments/README.md
-outputs/*
-!outputs/README.md
-.git
-*.pyc
+.env.*
+
+# IDE/editor state
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime logs
 *.log
-*.h5
+main.log
+logs/
+
+# Datasets and downloaded assets
+data/
+
+# Training outputs and artifacts
+checkpoints/
+experiments/
+outputs/
+models/
+runs/
+wandb/
+lightning_logs/
+mlruns/
+
+# Large archives and exported bundles
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.rar
+
+# Generated arrays, tables, reports, and media
 *.npy
-best_vs_worst.png
-score_hist.png
-score_scatter.png
-models/*
-!models/README.md
-src/filtered_mnist_topk/
-src/filtered_mnist_qq/
+*.npz
+*.h5
+*.hdf5
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.docx
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+
+# Notebooks and notebook exports
+*.ipynb
+*.html
+.ipynb_checkpoints/
+
+# Project documentation policy for the public repo
+*.md
+!README.md
+!docs/
+docs/*.md
+!docs/PIPELINE.md
+
+# Local archival folders
+archive_legacy/
+archive_unused/

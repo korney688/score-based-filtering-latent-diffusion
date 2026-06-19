@@ -12,14 +12,17 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 from src.Unet_model import UNet
 from src.autoencoder import SimpleAE
+from src.dataset_registry import build_torchvision_split
+
+
+DATASET_NAME = "mnist"
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,22 +30,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--encoder-path",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "ae_baseline_mnist" / "E.pt",
+        default=PROJECT_ROOT / "checkpoints" / DATASET_NAME / "autoencoders" / "ae_baseline_mnist" / "E.pt",
     )
     parser.add_argument(
         "--ae-checkpoint-path",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "ae_baseline_mnist" / "autoencoder_checkpoint.pt",
+        default=PROJECT_ROOT / "checkpoints" / DATASET_NAME / "autoencoders" / "ae_baseline_mnist" / "autoencoder_checkpoint.pt",
     )
     parser.add_argument(
         "--ddpm-path",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "ddpm_baseline" / "ddpm_mnist_baseline.pt",
+        default=PROJECT_ROOT / "checkpoints" / DATASET_NAME / "ddpm" / "ddpm_mnist_baseline.pt",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "outputs" / "latent_score_calibration",
+        default=PROJECT_ROOT / "outputs" / DATASET_NAME / "latent_score_calibration",
     )
     parser.add_argument("--num-samples", type=int, default=2000)
     parser.add_argument("--noise-repeats", type=int, default=3)
@@ -137,17 +140,12 @@ def load_baseline_ddpm(
 
 
 def build_loader(num_samples: int, batch_size: int) -> DataLoader:
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
-        ]
-    )
-    dataset = datasets.MNIST(
-        root=str(PROJECT_ROOT / "data"),
+    dataset = build_torchvision_split(
+        dataset_cfg=DATASET_NAME,
         train=False,
+        data_root=PROJECT_ROOT / "data",
+        transform_profile="normalized",
         download=False,
-        transform=transform,
     )
     subset_indices = np.arange(min(num_samples, len(dataset)), dtype=np.int64)
     subset = torch.utils.data.Subset(dataset, subset_indices.tolist())

@@ -27,7 +27,7 @@ from src.autoencoder_representation import RepresentationAutoencoder
 log = logging.getLogger(__name__)
 
 # All artifacts from this representation-autoencoder run are written here
-OUTPUT_DIR = PROJECT_ROOT / "outputs" / "ae_representation_mnist"
+OUTPUT_DIR = PROJECT_ROOT / "checkpoints" / "mnist" / "autoencoders" / "ae_representation_mnist"
 CHECKPOINT_PATH = OUTPUT_DIR / "autoencoder_checkpoint.pt"
 ENCODER_PATH = OUTPUT_DIR / "E.pt"
 LOSS_PLOT_PATH = OUTPUT_DIR / "loss_curve.png"

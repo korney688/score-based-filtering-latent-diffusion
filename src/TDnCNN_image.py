@@ -53,6 +53,12 @@ def prepare_for_fid(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
+def compute_ssim_item(x_pred, x_clean) -> float:
+    if x_clean.shape[0] == 1:
+        return float(ssim(x_clean[0], x_pred[0], data_range=1.0))
+    return float(ssim(x_clean, x_pred, data_range=1.0, channel_axis=0))
+
+
 def module_device(module: nn.Module) -> torch.device:
     return next(module.parameters()).device
 
@@ -162,13 +168,7 @@ def evaluate(
         x_pred_np = x_pred.detach().cpu().numpy()
         x_clean_np = x_clean.detach().cpu().numpy()
         for idx in range(batch_size):
-            total_ssim += float(
-                ssim(
-                    x_clean_np[idx, 0],
-                    x_pred_np[idx, 0],
-                    data_range=1.0,
-                )
-            )
+            total_ssim += compute_ssim_item(x_pred_np[idx], x_clean_np[idx])
 
         total_items += batch_size
 
@@ -201,9 +201,9 @@ def compute_metrics(
     mse = ((x_pred - x_clean) ** 2).mean().item()
     psnr = 20 * torch.log10(1.0 / torch.sqrt(((x_pred - x_clean) ** 2).mean() + 1e-8)).item()
 
-    clean_np = x_clean[0, 0].cpu().numpy()
-    pred_np = x_pred[0, 0].cpu().numpy()
-    ssim_val = ssim(clean_np, pred_np, data_range=1.0)
+    clean_np = x_clean[0].cpu().numpy()
+    pred_np = x_pred[0].cpu().numpy()
+    ssim_val = compute_ssim_item(pred_np, clean_np)
     lpips_val = compute_lpips(x_pred, x_clean, lpips_model)
 
     fid = create_fid_metric(torch.device("cpu"))

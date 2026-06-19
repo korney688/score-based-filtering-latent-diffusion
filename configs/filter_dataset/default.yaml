@@ -2,13 +2,26 @@ defaults:
   - _self_
 
 seed: 42
+dataset: ${dataset}
 
 # Stage 3 explicitly selects which validated latent-DDPM branch is used.
 ddpm_branch: baseline # baseline | induced
 
 # Stage 3 keeps only index selections; no filtered H5 dataset is created.
+# The default experiment runs the configured percentage sweep for both modes.
+filter_modes: [top_k, quantile]
+filter_percentages: [5, 10, 15]
+
+# Backward-compatible single-run fields. Used if filter_modes/filter_percentages are overridden away.
 filter_mode: top_k # top_k | quantile
 keep_ratio: 0.1
+
+# Active quantile mode uses QQ-spread stratified sampling over score quantile bins.
+quantile_min_points_per_bin: 30
+quantile_seed: 42
+
+# Legacy interval fields are kept for config compatibility only. They are not
+# used by active filter_mode=quantile.
 quantile_low: 0.0
 quantile_high: 0.1
 
@@ -21,16 +34,15 @@ num_workers: 0
 noisy_grid_n_images: 10
 grid_n_images: 64
 overwrite: false
+max_samples: null
 
-checkpoint_name: epoch_030.pth
-checkpoint_roots:
-  baseline: outputs/ddpm/latent_ddpm_baseline_ae_noise_consistency_mnist
-  induced: outputs/ddpm/latent_ddpm_induced_ae_noise_consistency_mnist
+# Use "latest" to select the newest epoch_*.pth, with best_model.pth as fallback.
+checkpoint_name: latest
 
 model:
   base_dim: 16
   deep: 3
   autoencoder_kind: noise_consistency
-  autoencoder_checkpoint_path: models/autoencoders/ae_noise_consistency_mnist/autoencoder_checkpoint.pt
+  autoencoder_checkpoint_path: ${dataset.paths.autoencoder_root}/${dataset.encoder.checkpoint_run}/autoencoder_checkpoint.pt
 
-output_root: experiments/exp_005_filtering
+output_root: ${dataset.paths.experiments_root}/exp_005_filtering

@@ -1,0 +1,53 @@
+defaults:
+  - _self_
+
+slug: mnist
+name: MNIST
+torchvision_name: MNIST
+channels: 1
+in_channels: 1
+out_channels: 1
+image_size: 28
+num_classes: 10
+mean: [0.5]
+std: [0.5]
+download: false
+
+encoder:
+  name: noise_consistency_small
+  latent_dim: 16
+  checkpoint_run: ae_noise_consistency_mnist
+
+encoder_validation:
+  candidates:
+    baseline:
+      kind: baseline
+      checkpoint_run: ae_baseline_mnist
+    representation:
+      kind: representation
+      checkpoint_run: ae_representation_mnist
+    noise_consistency:
+      kind: noise_consistency
+      architecture: noise_consistency_small
+      latent_dim: 16
+      checkpoint_run: ae_noise_consistency_mnist
+    vae:
+      kind: vae
+      checkpoint_run: ae_vae_mnist
+
+latent_ddpm_validation:
+  runs:
+    baseline:
+      latent_noise_mode: baseline
+      checkpoint_run: latent_ddpm_baseline_ae_noise_consistency_mnist
+    induced:
+      latent_noise_mode: induced
+      checkpoint_run: latent_ddpm_induced_ae_noise_consistency_mnist
+
+paths:
+  data_root: ${hydra:runtime.cwd}/data
+  experiments_root: ${hydra:runtime.cwd}/experiments/${dataset.slug}
+  outputs_root: ${hydra:runtime.cwd}/outputs/${dataset.slug}
+  checkpoints_root: ${hydra:runtime.cwd}/checkpoints/${dataset.slug}
+  autoencoder_root: ${dataset.paths.checkpoints_root}/autoencoders
+  ddpm_root: ${dataset.paths.checkpoints_root}/ddpm

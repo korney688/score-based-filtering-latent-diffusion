@@ -7,11 +7,13 @@ import torch.nn.functional as F
 
 from src.Unet_model import UNet
 from src.autoencoder import SimpleAE
-from src.autoencoder_noise_consistency import NoiseConsistencyAutoencoder
+from src.autoencoder_noise_consistency import build_noise_consistency_autoencoder
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_AE_CHECKPOINT_PATH = PROJECT_ROOT / "models" / "autoencoder.pth"
+DEFAULT_AE_CHECKPOINT_PATH = (
+    PROJECT_ROOT / "checkpoints" / "mnist" / "autoencoders" / "ae_noise_consistency_mnist" / "autoencoder_checkpoint.pt"
+)
 
 
 def _extract_state_dict(maybe_state: Any) -> dict[str, torch.Tensor]:
@@ -31,15 +33,75 @@ def _encode_deterministic(autoencoder: nn.Module, x: torch.Tensor) -> torch.Tens
     return encoded
 
 
-def load_frozen_autoencoder(kind: str, checkpoint_path: str | Path, device: str | torch.device) -> nn.Module:
+def _cfg_get(cfg: Any | None, key: str, default: Any) -> Any:
+    if cfg is None:
+        return default
+    if isinstance(cfg, dict):
+        return cfg.get(key, default)
+    return getattr(cfg, key, default)
+
+
+def autoencoder_input_shape(dataset_cfg: Any | None = None) -> tuple[int, int]:
+    in_channels = int(_cfg_get(dataset_cfg, "in_channels", _cfg_get(dataset_cfg, "channels", 1)))
+    image_size = int(_cfg_get(dataset_cfg, "image_size", 28))
+    return in_channels, image_size
+
+
+def instantiate_autoencoder(
+    kind: str,
+    device: str | torch.device,
+    dataset_cfg: Any | None = None,
+    architecture: str | None = None,
+    latent_dim: int | None = None,
+) -> nn.Module:
     # Choose which autoencoder architecture should be used for the latent space
     if kind in {"baseline", "simple"}:
         autoencoder = SimpleAE().to(device)
     elif kind == "noise_consistency":
-        autoencoder = NoiseConsistencyAutoencoder().to(device)
+        encoder_cfg = _cfg_get(dataset_cfg, "encoder", {})
+        resolved_architecture = architecture or _cfg_get(encoder_cfg, "name", "noise_consistency_small")
+        resolved_latent_dim = int(latent_dim or _cfg_get(encoder_cfg, "latent_dim", 16))
+        autoencoder = build_noise_consistency_autoencoder(
+            architecture=resolved_architecture,
+            dataset_cfg=dataset_cfg,
+            latent_dim=resolved_latent_dim,
+        ).to(device)
     else:
         raise ValueError(f"Unsupported latent-DDPM autoencoder kind: {kind}")
+    return autoencoder
 
+
+def _infer_noise_consistency_config_from_state_dict(state_dict: dict[str, torch.Tensor]) -> tuple[str | None, int | None]:
+    architecture = None
+    first_conv = state_dict.get("encoder.net.0.weight")
+    if first_conv is not None:
+        out_channels = int(first_conv.shape[0])
+        if out_channels == 32:
+            architecture = "noise_consistency_large"
+        elif out_channels == 8:
+            architecture = "noise_consistency_small"
+
+    latent_dim = None
+    latent_weight = state_dict.get("encoder.net.5.weight")
+    if latent_weight is not None:
+        latent_dim = int(latent_weight.shape[0])
+
+    return architecture, latent_dim
+
+
+def freeze_autoencoder(autoencoder: nn.Module) -> nn.Module:
+    autoencoder.eval()
+    for param in autoencoder.parameters():
+        param.requires_grad = False
+    return autoencoder
+
+
+def load_frozen_autoencoder(
+    kind: str,
+    checkpoint_path: str | Path,
+    device: str | torch.device,
+    dataset_cfg: Any | None = None,
+) -> nn.Module:
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Missing autoencoder checkpoint: {checkpoint_path}")
@@ -47,22 +109,36 @@ def load_frozen_autoencoder(kind: str, checkpoint_path: str | Path, device: str 
     # Load the saved autoencoder weights before using it inside DDPM
     checkpoint = torch.load(checkpoint_path, map_location=device)
     checkpoint_dict = checkpoint if isinstance(checkpoint, dict) else {}
+    state_dict = checkpoint_dict.get("model_state_dict") if "model_state_dict" in checkpoint_dict else _extract_state_dict(checkpoint)
+    inferred_architecture, inferred_latent_dim = _infer_noise_consistency_config_from_state_dict(state_dict)
+    architecture = checkpoint_dict.get("architecture", inferred_architecture)
+    latent_dim = checkpoint_dict.get("latent_dim", inferred_latent_dim)
+
+    autoencoder = instantiate_autoencoder(
+        kind=kind,
+        device=device,
+        dataset_cfg=dataset_cfg,
+        architecture=architecture,
+        latent_dim=latent_dim,
+    )
     if "model_state_dict" in checkpoint_dict:
-        autoencoder.load_state_dict(checkpoint_dict["model_state_dict"])
+        autoencoder.load_state_dict(state_dict)
     else:
-        autoencoder.load_state_dict(_extract_state_dict(checkpoint))
+        autoencoder.load_state_dict(state_dict)
 
     # Freeze the autoencoder: DDPM trains only the noise prediction model
-    autoencoder.eval()
-    for param in autoencoder.parameters():
-        param.requires_grad = False
-    return autoencoder
+    return freeze_autoencoder(autoencoder)
 
 
-def infer_latent_dim(autoencoder: nn.Module, device: str | torch.device) -> int:
+def infer_latent_dim(
+    autoencoder: nn.Module,
+    device: str | torch.device,
+    dataset_cfg: Any | None = None,
+) -> int:
     # Pass one fake image through the encoder to find the latent vector size
+    in_channels, image_size = autoencoder_input_shape(dataset_cfg)
     with torch.no_grad():
-        dummy = torch.zeros(1, 1, 28, 28, device=device)
+        dummy = torch.zeros(1, in_channels, image_size, image_size, device=device)
         z = _encode_deterministic(autoencoder, dummy)
     return int(z.flatten(start_dim=1).shape[1])
 
@@ -183,14 +259,20 @@ def build_DDPM_model(
     latent_noise_mode: str = "baseline",
     autoencoder_kind: str = "baseline",
     autoencoder_checkpoint_path: str | Path = DEFAULT_AE_CHECKPOINT_PATH,
+    dataset_cfg: Any | None = None,
+    autoencoder: nn.Module | None = None,
 ) -> DDPM:
     # Load a pretrained autoencoder that defines the latent space.
-    autoencoder = load_frozen_autoencoder(
-        kind=autoencoder_kind,
-        checkpoint_path=autoencoder_checkpoint_path,
-        device=device,
-    )
-    latent_dim = infer_latent_dim(autoencoder, device)
+    if autoencoder is None:
+        autoencoder = load_frozen_autoencoder(
+            kind=autoencoder_kind,
+            checkpoint_path=autoencoder_checkpoint_path,
+            device=device,
+            dataset_cfg=dataset_cfg,
+        )
+    else:
+        autoencoder = freeze_autoencoder(autoencoder.to(device))
+    latent_dim = infer_latent_dim(autoencoder, device, dataset_cfg=dataset_cfg)
 
     aniso_kernel = (1, 1)
     aniso_stride = (1, 1)

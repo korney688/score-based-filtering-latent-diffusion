@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 
 # Fixed training constants for this protocol-specific baseline AE run
 # They are kept in the script to preserve the original experiment behavior
-OUTPUT_DIR = PROJECT_ROOT / "outputs" / "ae_baseline_mnist"
+OUTPUT_DIR = PROJECT_ROOT / "checkpoints" / "mnist" / "autoencoders" / "ae_baseline_mnist"
 CHECKPOINT_PATH = OUTPUT_DIR / "autoencoder_checkpoint.pt"
 ENCODER_PATH = OUTPUT_DIR / "E.pt"   # Only encoder checkpoints
 LOSS_PLOT_PATH = OUTPUT_DIR / "loss_curve.png"
