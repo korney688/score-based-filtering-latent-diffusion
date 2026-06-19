@@ -1,8 +1,28 @@
-# Dataset-Scoped Latent-DDPM Filtering Project
+# Score-Based Filtering in Latent Diffusion Pipelines
 
-Research pipeline for dataset-scoped encoder training, latent-DDPM training and validation, score-based train-set filtering, and downstream TDnCNN denoising validation.
+Research pipeline for encoder training, latent-DDPM score estimation, score-based training-data filtering, and downstream TDnCNN denoising validation.
 
-Active dataset slugs are `mnist`, `cifar10`, and `imagenet100`.
+The project supports dataset-scoped experiments for `mnist`, `cifar10`, and `imagenet100`. The active ImageNet-derived benchmark is `imagenet100`.
+
+## Pipeline
+
+```text
+Encoder Training
+-> Encoder Validation
+-> Baseline vs Induced Latent-DDPM
+-> Score Validation
+-> Score-Based Filtering
+-> TDnCNN Downstream Validation
+-> Research Artifacts
+```
+
+Dataset-scoped artifacts are written under:
+
+```text
+checkpoints/<dataset>/
+experiments/<dataset>/
+outputs/<dataset>/
+```
 
 ## Environment
 
@@ -16,6 +36,13 @@ On Windows with the local virtual environment:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Fast verification only:
+
+```bash
+python -m compileall -q scripts src
+python scripts/train_tdncnn.py --dataset imagenet100 --list-runs
 ```
 
 ## Dataset Configs
@@ -32,285 +59,109 @@ Noise-consistency encoder defaults:
 - CIFAR-10: `noise_consistency_large`, `latent_dim=128`.
 - ImageNet-100: `noise_consistency_large`, `latent_dim=256`.
 
-Dataset-scoped artifact roots:
+## ImageNet-100 Data
 
-```text
-experiments/<dataset>/
-checkpoints/<dataset>/
-outputs/<dataset>/
-```
-
-## ImageNet-100 Research Run
-
-ImageNet-100 is the active ImageNet-derived research benchmark. It keeps the same protocol:
-
-```text
-Encoder Validation
--> Encoder Selection
--> Baseline vs Induced Latent-DDPM
--> Score Validation
--> Score-Based Filtering
--> TDnCNN Downstream Validation
-```
-
-Expected local data layout:
+Expected local ImageFolder layout:
 
 ```text
 data/imagenet100/
-├── train/<class_name>/*.JPEG
-└── val/<class_name>/*.JPEG
+|-- train/<class_name>/*.JPEG
+`-- val/<class_name>/*.JPEG
 ```
 
-Class folders may use either local names such as `class_000` or ImageNet synset names such as `n01440764`. No downloader is provided; the dataset must already be prepared in an ImageFolder-compatible layout. The validation split must already be arranged under `val/<class_name>/`.
-
-Future manual run sequence:
+Class folders may use either local names such as `class_000` or ImageNet synset names such as `n01440764`. The dataset must be prepared before training. A helper downloader for the selected HuggingFace ImageNet-100 source is available:
 
 ```bash
-# 1. Dry-run encoder config
-python scripts/train_encoder.py noise-consistency --dataset imagenet100 --variant large --latent-dim 256 --epochs 0
-
-# 2. Train encoder manually
-python scripts/train_encoder.py noise-consistency --dataset imagenet100 --variant large --latent-dim 256
-
-# 3. Validate encoder
-python scripts/evaluate_encoder.py compare-encoders --dataset imagenet100
-
-# 4. Train latent-DDPM baseline and induced manually
-python scripts/main.py dataset=imagenet100 task=train_latent_DDPM train_latent_DDPM.latent_noise_mode=baseline
-python scripts/main.py dataset=imagenet100 task=train_latent_DDPM train_latent_DDPM.latent_noise_mode=induced
-
-# 5. Validate score
-python scripts/evaluate_latent_ddpm_score.py --dataset imagenet100
-
-# 6. Filter dataset
-python scripts/main.py dataset=imagenet100 task=filter_dataset filter_dataset.ddpm_branch=induced
-
-# 7. TDnCNN downstream validation
-python scripts/train_tdncnn.py --dataset imagenet100 --run full
-python scripts/train_tdncnn.py --dataset imagenet100 --run topk_10
+python scripts/download_imagenet100_hf.py --output-dir data/imagenet100
 ```
 
-ImageNet-100 smoke commands for later manual checks:
+For local pipeline smoke checks without the full ImageNet-100 dataset, a CIFAR-10-based ImageFolder subset can be prepared separately:
 
 ```bash
-python scripts/evaluate_encoder.py compare-encoders --dataset imagenet100 --num-samples 8 --batch-size 4
-python scripts/main.py dataset=imagenet100 task=filter_dataset filter_dataset.ddpm_branch=induced filter_dataset.max_samples=16 filter_dataset.batch_size=4 filter_dataset.grid_n_images=8 filter_dataset.noisy_grid_n_images=4 filter_dataset.output_root=experiments/imagenet100/exp_005_filtering_induced_smoke filter_dataset.overwrite=true
-python scripts/train_tdncnn.py --dataset imagenet100 --list-runs
-python scripts/train_tdncnn.py --dataset imagenet100 --run topk_10_smoke --epochs 1 --batch-size 2 --max-train-samples 16 --max-test-samples 8
+python scripts/prepare_smoke_imagenet_from_cifar10.py
 ```
 
-Expected ImageNet-100 artifact roots:
+## Main Commands
 
-```text
-checkpoints/imagenet100/autoencoders/noise_consistency_large_latent256/
-outputs/imagenet100/autoencoders/noise_consistency_large_latent256/
-checkpoints/imagenet100/ddpm/latent_ddpm_baseline_ae_noise_consistency_imagenet100/
-checkpoints/imagenet100/ddpm/latent_ddpm_induced_ae_noise_consistency_imagenet100/
-experiments/imagenet100/exp_002_encoder_validation/
-experiments/imagenet100/exp_003_latent_ddpm_validation/
-experiments/imagenet100/exp_005_filtering/
-experiments/imagenet100/exp_006_tdncnn/
-```
-
-## Main Pipeline
-
-### 1. Train Encoders
-
-MNIST supports all historical encoder variants:
-
-```bash
-python scripts/train_encoder.py baseline --dataset mnist
-python scripts/train_encoder.py noise-consistency --dataset mnist --variant small
-python scripts/train_encoder.py representation --dataset mnist
-python scripts/train_encoder.py vae --dataset mnist
-```
-
-CIFAR-10 and ImageNet-100 use the noise-consistency autoencoder:
+Train noise-consistency encoders:
 
 ```bash
 python scripts/train_encoder.py noise-consistency --dataset cifar10 --variant large --latent-dim 128
 python scripts/train_encoder.py noise-consistency --dataset imagenet100 --variant large --latent-dim 256
 ```
 
-Smoke-test commands without full training:
+Validate encoder:
 
 ```bash
-python scripts/train_encoder.py noise-consistency --dataset mnist --variant small --epochs 0
-python scripts/train_encoder.py noise-consistency --dataset cifar10 --variant large --latent-dim 128 --epochs 0
-python scripts/train_encoder.py noise-consistency --dataset imagenet100 --variant large --latent-dim 256 --epochs 0
-```
-
-### 2. Validate And Select Encoder
-
-```bash
-python scripts/evaluate_encoder.py compare-encoders --dataset mnist
-python scripts/evaluate_encoder.py compare-encoders --dataset cifar10
 python scripts/evaluate_encoder.py compare-encoders --dataset imagenet100
 ```
 
-Expected output:
-
-```text
-experiments/<dataset>/exp_002_encoder_validation/
-├── metrics/
-├── latent_geometry/
-├── covariance/
-├── eigenspectrum/
-├── reconstructions/
-├── report/
-└── summary.json
-```
-
-### 3. Train Latent-DDPM
-
-Hydra entrypoint:
-
-```bash
-python scripts/main.py task=train_latent_DDPM
-```
-
-ImageNet-100 latent-DDPM commands:
+Train latent-DDPM baseline and induced branches:
 
 ```bash
 python scripts/main.py dataset=imagenet100 task=train_latent_DDPM train_latent_DDPM.latent_noise_mode=baseline
 python scripts/main.py dataset=imagenet100 task=train_latent_DDPM train_latent_DDPM.latent_noise_mode=induced
 ```
 
-The selected ImageNet-100 encoder checkpoint is configured as:
-
-```text
-checkpoints/imagenet100/autoencoders/noise_consistency_large_latent256/autoencoder_checkpoint.pt
-```
-
-`train_latent_DDPM.max_samples` is not part of the current DDPM training config. Use `train_latent_DDPM.smoke_model_only=true` for configuration/model-shape checks, or reduce `train_latent_DDPM.batch_size` for manual experiments.
-
-### 4. Validate Latent-DDPM Score
+Validate latent-DDPM scores:
 
 ```bash
-python scripts/evaluate_latent_ddpm_score.py --dataset mnist
-python scripts/evaluate_latent_ddpm_score.py --dataset cifar10
 python scripts/evaluate_latent_ddpm_score.py --dataset imagenet100
 ```
 
-This stage keeps the score definition unchanged:
-
-```text
-score = ||eps_pred||^2
-```
-
-Expected output:
-
-```text
-experiments/<dataset>/exp_003_latent_ddpm_validation/
-├── metrics/
-├── score_validation/
-├── score_distributions/
-├── noise_prediction/
-├── covariance/
-├── report/
-└── summary.json
-```
-
-### 5. Score-Based Filtering
+Run score-based filtering:
 
 ```bash
 python scripts/main.py dataset=imagenet100 task=filter_dataset filter_dataset.ddpm_branch=baseline
 python scripts/main.py dataset=imagenet100 task=filter_dataset filter_dataset.ddpm_branch=induced
 ```
 
-The default config runs both `top_k` and `quantile` filtering at `5%`, `10%`, and `15%`.
+Run TDnCNN downstream validation:
 
-Filtering modes:
+```bash
+python scripts/train_tdncnn.py --dataset imagenet100 --list-runs
+python scripts/train_tdncnn.py --dataset imagenet100 --run full
+python scripts/train_tdncnn.py --dataset imagenet100 --run topk_10
+```
+
+## Filtering Modes
+
+The default filtering config runs `top_k` and `quantile` filtering at `5%`, `10%`, and `15%`.
 
 - `top_k`: selects the lowest-score samples globally. Lower score means a more typical sample for the current score definition.
 - `quantile`: performs stratified sampling over score quantile bins, selecting the configured fraction from each bin. This preserves score-distribution coverage and avoids collapsing the subset into only the lowest-score region.
 
-The active `quantile` mode is not a single quantile interval. It is a QQ-spread / stratified quantile sampling strategy inherited from the laboratory filtering protocol.
+The active `quantile` mode is not a single quantile interval. It is a QQ-spread / stratified quantile sampling strategy.
 
-Expected output:
+Per filtering directory, expected files include:
 
 ```text
-experiments/imagenet100/exp_005_filtering/
-├── topk/
-│   ├── 5/
-│   ├── 10/
-│   └── 15/
-├── quantile/
-│   ├── 5/
-│   ├── 10/
-│   └── 15/
-├── metrics/
-├── plots/
-├── report/
-└── summary.json
+scores.csv
+selected_indices.npy
+metadata.json
+config.yaml
+score_histogram.png
+best_samples_grid.png
+worst_samples_grid.png
+selected_samples_grid.png
+rejected_samples_grid.png
 ```
 
-Per filtering directory:
+For `filter_mode=quantile`, `metadata.json` records `algorithm=quantile_spread`, `keep_ratio`, `min_points_per_bin`, `seed`, `n_bins`, and the actual selected count.
 
-- `scores.csv`
-- `selected_indices.npy`
-- `metadata.json`
-- `config.yaml`
-- `score_histogram.png`
-- `best_samples_grid.png`
-- `worst_samples_grid.png`
-- `selected_samples_grid.png`
-- `rejected_samples_grid.png`
-- `best_noisy_grid.png`
-- `worst_noisy_grid.png`
-- `best_clean_noisy_grid.png`
-- `worst_clean_noisy_grid.png`
+## Research Artifacts
 
-For `filter_mode=quantile`, `metadata.json` records
-`algorithm=quantile_spread`, `keep_ratio`, `min_points_per_bin`, `seed`,
-`n_bins`, and the actual selected count. Existing `quantile_low` and
-`quantile_high` fields are legacy compatibility fields and are not used by the
-active quantile algorithm.
-
-### 6. TDnCNN Downstream Validation
-
-List configured runs:
-
-```bash
-python scripts/train_tdncnn.py --dataset mnist --list-runs
-python scripts/train_tdncnn.py --dataset cifar10 --list-runs
-python scripts/train_tdncnn.py --dataset imagenet100 --list-runs
-```
-
-ImageNet-100 TDnCNN commands:
-
-```bash
-python scripts/train_tdncnn.py --dataset imagenet100 --run topk_10_smoke --epochs 1 --batch-size 2 --max-train-samples 16 --max-test-samples 8
-python scripts/train_tdncnn.py --dataset imagenet100 --run topk_10
-python scripts/train_tdncnn.py --dataset imagenet100 --run full
-```
-
-ImageNet-100 TDnCNN routing:
-
-- filtered indices: `experiments/imagenet100/exp_005_filtering/topk/10/selected_indices.npy`
-- outputs: `experiments/imagenet100/exp_006_tdncnn/topk_10/`
-- checkpoint: `checkpoints/imagenet100/tdncnn/topk_10.pth`
-
-TDnCNN on 64x64 images should use smaller smoke batch sizes than MNIST/CIFAR-10.
-
-## Research-Style Plots
-
-The reporting layer builds laboratory-report-style figures from existing artifacts only. It does not train models, run filtering, or change the score definition.
+The reporting layer generates analysis artifacts from existing experiment outputs. It does not train models, run filtering, or change the score definition.
 
 Entrypoint:
 
 ```bash
-python scripts/generate_research_plots.py --dataset cifar10 --stage all
 python scripts/generate_research_plots.py --dataset imagenet100 --stage all
 python scripts/generate_research_plots.py --dataset imagenet100 --stage filtering
 python scripts/generate_research_plots.py --dataset imagenet100 --stage tdncnn
 ```
 
-Supported stages:
-
-- `filtering`: score distribution plots for Top-K, QQ-spread Quantile, random 10%, and selected/rejected examples.
-- `ddpm`: score/latent training dynamics when per-epoch score stats exist, with DDPM loss fallback.
-- `tdncnn`: PSNR/MSE/SSIM/LPIPS CDF comparisons, median-gap tables, difficult-subset plots, and qualitative denoising examples when per-image metrics exist.
+Generated artifacts include score-distribution figures, selected/rejected sample grids, DDPM training dynamics when available, TDnCNN metric comparisons, summary tables, and qualitative denoising examples.
 
 Outputs are saved under:
 
@@ -321,45 +172,55 @@ experiments/<dataset>/exp_006_tdncnn/comparison_plots/research_style/
 experiments/<dataset>/exp_006_tdncnn/qualitative/research_style/
 ```
 
-Required inputs are existing `scores.csv`, `selected_indices.npy`, filtering grids, DDPM `DDPM_metrics.csv` or optional `score_training_dynamics.csv`, and TDnCNN `results/per_image_metrics.csv` for CDF plots. Missing inputs are skipped with warnings when `--strict false`.
+Required inputs are existing `scores.csv`, `selected_indices.npy`, filtering grids, DDPM `DDPM_metrics.csv` or optional `score_training_dynamics.csv`, and TDnCNN `results/per_image_metrics.csv`. Missing inputs are skipped with warnings when `--strict false`.
 
-Mapping from the wireless-denoising report style:
+## Docker
 
-```text
-Lab SNR distribution plots
--> score distribution plots
+The repository includes a Dockerfile for DGX and CUDA-enabled runs. The container opens `bash` by default and does not start training automatically.
 
-Lab score/SNR dynamics over DDPM training
--> score/latent dynamics over latent-DDPM training
+Build locally:
 
-Lab capacity CDF and gap comparison
--> PSNR/MSE/SSIM/LPIPS CDF and gap comparison
-
-Lab PDP/PAP diversity examples
--> selected/rejected image examples and denoising/error-map grids
+```bash
+docker build -t latent-ddpm-score-filtering:latest .
 ```
+
+Example run with mounted project artifacts:
+
+```bash
+docker run --rm -it --gpus all \
+  -v /path/to/data:/workspace/data \
+  -v /path/to/checkpoints:/workspace/checkpoints \
+  -v /path/to/experiments:/workspace/experiments \
+  -v /path/to/outputs:/workspace/outputs \
+  latent-ddpm-score-filtering:latest
+```
+
+## Automation Scripts
+
+ImageNet-100 DGX scripts are provided for reproducible manual launches:
+
+```bash
+scripts/run_imagenet100_dgx_smoke.sh
+scripts/run_imagenet100_full.sh
+scripts/run_imagenet100_downstream_grid.sh
+```
+
+They are intended to be inspected before execution and run manually inside the prepared environment.
 
 ## Project Layout
 
 ```text
 configs/      Hydra configs, including dataset configs
-data/         Reusable local data assets
-experiments/  Dataset-scoped experiment artifacts
-checkpoints/  Dataset-scoped model checkpoints
-notebooks/    Analysis notebooks and exported reports
-outputs/      Dataset-scoped generated outputs
 scripts/      Public entrypoints and internal runners
 src/          Model, dataset, filtering, and evaluation code
+tests/        Fast unit-level checks
 docs/         Supporting documentation
+data/         Local datasets, not committed
+checkpoints/  Local model checkpoints, not committed
+experiments/  Local experiment artifacts, not committed
+outputs/      Local generated outputs, not committed
 ```
 
-## Verification
+## Notes
 
-Use fast checks only:
-
-```bash
-python -m compileall -q scripts src
-python scripts/train_tdncnn.py --dataset imagenet100 --list-runs
-```
-
-Do not run full encoder training, latent-DDPM training, score validation on the full dataset, full filtering, or TDnCNN training as setup verification.
+Do not use full encoder training, latent-DDPM training, score validation on the full dataset, full filtering, or TDnCNN training as setup verification. Use the fast compile and run-list checks first.
