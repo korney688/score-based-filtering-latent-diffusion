@@ -255,6 +255,3 @@ experiments/  Local experiment artifacts, not committed
 outputs/      Local generated outputs, not committed
 ```
 
-## Notes
-
-Do not use full encoder training, latent-DDPM training, score validation on the full dataset, full filtering, or TDnCNN training as setup verification. Use the fast compile and run-list checks first.
