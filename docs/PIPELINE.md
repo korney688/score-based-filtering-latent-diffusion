@@ -2,7 +2,7 @@
 
 This document describes the active dataset-scoped research pipeline.
 
-MNIST remains the complete end-to-end protocol. CIFAR-10 remains active for noise-consistency encoder training, encoder validation, latent-DDPM training/validation, score-based filtering, and TDnCNN downstream validation. ImageNet-100 is the active ImageNet-derived research benchmark.
+MNIST remains the complete end-to-end protocol. CIFAR-10 remains active for noise-consistency encoder training, encoder validation, latent-DDPM training/validation, score-based filtering, and TDnCNN downstream validation. ImageNet-100 is the active ImageNet-derived research benchmark and now includes DRUNet as an additional downstream denoiser.
 
 ## 1. Dataset Layer
 
@@ -48,7 +48,8 @@ Encoder Validation
 -> Baseline vs Induced Latent-DDPM
 -> Score Validation
 -> Score-Based Filtering
--> TDnCNN Downstream Validation
+-> Downstream Denoising Validation (TDnCNN / DRUNet)
+-> External Benchmark Evaluation
 ```
 
 Use one dataset slug everywhere:
@@ -359,7 +360,202 @@ Routing:
 
 TDnCNN on 64x64 images should use smaller smoke batch sizes than MNIST/CIFAR-10.
 
-## 9. Research-Style Plotting Layer
+## 9. DRUNet Downstream Validation
+
+DRUNet is integrated as a second downstream denoiser for the ImageNet-100 score-filtering experiment. It does not change encoder training, latent-DDPM training, score computation, score validation, filtering, or TDnCNN outputs.
+
+Entrypoint:
+
+```bash
+python scripts/train_drunet.py
+```
+
+Implementation:
+
+- `scripts/train_drunet.py`
+- `scripts/internal/run_DRUNet_image_suite.py`
+- `scripts/internal/drunet_image_runs_config.py`
+- `scripts/internal/train_DRUNet_image.py`
+- `src/DRUNet_image.py`
+- `src/external/drunet/network_unet.py`
+- `src/external/drunet/basicblock.py`
+
+Model:
+
+- official DPIR DRUNet `UNetRes`;
+- wrapped by `OfficialDRUNetAdapter`;
+- public project API remains `forward(x, sigma=None)`;
+- the adapter creates a noise-level map and calls the official network with `[B, 4, H, W]` input.
+
+Production ImageNet-100 protocol:
+
+- fixed denoising noise: `sigma = 25 / 255`;
+- image size: `64 x 64`;
+- optimizer: Adam;
+- learning rate: `1e-4`;
+- scheduler: none;
+- seed: `42`;
+- epochs: `15`;
+- batch size: `64`.
+
+Production run configs:
+
+- `full_sigma25`
+- `quantile10_sigma25`
+- `topk10_sigma25`
+
+Commands:
+
+```bash
+python scripts/train_drunet.py --dataset imagenet100 --list-runs
+python scripts/train_drunet.py --dataset imagenet100 --dry-run
+python scripts/train_drunet.py --dataset imagenet100 --run quantile10_sigma25 --data-root /workspace/data
+python scripts/train_drunet.py --dataset imagenet100 --run topk10_sigma25 --data-root /workspace/data
+python scripts/train_drunet.py --dataset imagenet100 --run full_sigma25 --data-root /workspace/data
+```
+
+Unified launch script:
+
+```bash
+bash scripts/run_drunet_imagenet100_production.sh
+```
+
+Routing:
+
+- full run: ImageNet-100 train partition;
+- quantile run: `experiments/imagenet100/exp_005_filtering/quantile/10/selected_indices.npy`;
+- top-k run: `experiments/imagenet100/exp_005_filtering/topk/10/selected_indices.npy`;
+- outputs: `experiments/imagenet100/exp_007_drunet/<run>/`;
+- checkpoints: `checkpoints/imagenet100/drunet/<run>.pth`.
+
+Per-run artifacts:
+
+- `config.json`
+- `metrics.json`
+- `results/metrics_history.csv`
+- `results/training_history.csv`
+- `results/per_image_metrics.csv`
+- `results/loss_curve.png`
+- `results/qualitative_triplets.png`
+- `<run>_example.png`
+- checkpoint `.pth`
+
+Console logging mirrors TDnCNN and reports per epoch:
+
+```text
+train_loss
+val_loss
+psnr
+ssim
+lpips
+fid
+```
+
+No separate internal validation command is required. Validation metrics and per-image metrics are written by the DRUNet training runner after each production run.
+
+## 10. External Benchmark Evaluation
+
+External benchmark evaluation is a publication-style inference-only stage for already trained DRUNet checkpoints. It is independent from encoder training, latent-DDPM training, score validation, score-based filtering, and DRUNet training.
+
+Supported benchmarks:
+
+- `Kodak24`
+- `CBSD68`
+- `Urban100`
+
+Expected read-only dataset root:
+
+```text
+data/external_benchmarks/
+├── Kodak24/
+├── CBSD68/
+└── Urban100/
+```
+
+Dataset preparation/validation utility:
+
+```bash
+python scripts/prepare_external_benchmarks.py
+python scripts/prepare_external_benchmarks.py --strict
+```
+
+This validates folder presence, counts image files, checks RGB format, and writes:
+
+```text
+data/external_benchmarks/dataset_manifest.json
+```
+
+Evaluation entrypoint:
+
+```bash
+python scripts/evaluate_external.py \
+  --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth \
+  --dataset Kodak24 \
+  --sigma 25
+
+python scripts/evaluate_external.py \
+  --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth \
+  --all-benchmarks \
+  --sigma 25
+```
+
+Noise protocol:
+
+- Gaussian noise generated on the fly;
+- supported sigma values: `15`, `25`, `50`;
+- primary protocol: `sigma=25`, internally `25/255`;
+- clean ground-truth images are unchanged.
+
+Inference protocol:
+
+- loads a trained DRUNet checkpoint;
+- uses `OfficialDRUNetAdapter`;
+- pads images to a multiple of 8 before inference;
+- crops predictions back to the original resolution;
+- does not resize benchmark images;
+- does not crop benchmark images;
+- does not augment benchmark images.
+
+Metrics:
+
+- PSNR;
+- SSIM;
+- optional LPIPS with `--lpips` when pretrained weights are available.
+
+Artifacts:
+
+```text
+experiments/external_benchmarks/<checkpoint_name>/
+├── summary.json
+├── Kodak24/
+│   ├── metrics.csv
+│   ├── summary.json
+│   ├── report.md
+│   └── qualitative/
+├── CBSD68/
+│   ├── metrics.csv
+│   ├── summary.json
+│   ├── report.md
+│   └── qualitative/
+└── Urban100/
+    ├── metrics.csv
+    ├── summary.json
+    ├── report.md
+    └── qualitative/
+```
+
+Qualitative outputs include ground truth, noisy input, denoised output, and an absolute error map for representative images.
+
+Quick checks:
+
+```bash
+python scripts/evaluate_external.py --help
+python scripts/prepare_external_benchmarks.py
+```
+
+Do not run full benchmark evaluation as infrastructure verification.
+
+## 11. Research-Style Plotting Layer
 
 Entrypoint:
 
@@ -373,7 +569,7 @@ python scripts/generate_research_plots.py --dataset imagenet100 --stage tdncnn
 Behavior:
 
 - reads existing experiment artifacts only;
-- does not run encoder training, DDPM training, filtering, or TDnCNN training;
+- does not run encoder training, DDPM training, filtering, TDnCNN training, or DRUNet training;
 - writes PNG and PDF figures where possible;
 - skips missing inputs with warnings by default;
 - raises on missing required inputs only with `--strict true`.
@@ -446,6 +642,22 @@ noisy_ssim
 noisy_lpips
 ```
 
+DRUNet production runs save the same downstream metric schema under:
+
+```text
+experiments/<dataset>/exp_007_drunet/<run_name>/metrics.json
+experiments/<dataset>/exp_007_drunet/<run_name>/results/per_image_metrics.csv
+experiments/<dataset>/exp_007_drunet/<run_name>/results/training_history.csv
+```
+
+The active ImageNet-100 DRUNet run names are:
+
+```text
+full_sigma25
+quantile10_sigma25
+topk10_sigma25
+```
+
 Image-domain mapping from the wireless report:
 
 ```text
@@ -464,7 +676,7 @@ Lab PDP/PAP diversity examples
 
 Wireless-specific quantities such as PDP, PAP, capacity, UL/DL, rank, fixed noise power, and SNR in dB are not used in this image-domain reporting layer.
 
-## 10. Full ImageNet-100 Manual Sequence
+## 12. Full ImageNet-100 Manual Sequence
 
 ```bash
 # 1. Dry-run encoder config
@@ -489,17 +701,30 @@ python scripts/main.py dataset=imagenet100 task=filter_dataset filter_dataset.dd
 # 7. TDnCNN downstream validation
 python scripts/train_tdncnn.py --dataset imagenet100 --run full
 python scripts/train_tdncnn.py --dataset imagenet100 --run topk_10
+
+# 8. DRUNet downstream validation
+python scripts/train_drunet.py --dataset imagenet100 --run quantile10_sigma25 --data-root /workspace/data
+python scripts/train_drunet.py --dataset imagenet100 --run topk10_sigma25 --data-root /workspace/data
+python scripts/train_drunet.py --dataset imagenet100 --run full_sigma25 --data-root /workspace/data
+
+# 9. External benchmark evaluation for trained DRUNet checkpoints
+python scripts/prepare_external_benchmarks.py --strict
+python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth --all-benchmarks --sigma 25
 ```
 
-## 11. Verification
+## 13. Verification
 
 Allowed quick checks:
 
 ```bash
 python -m compileall -q scripts src
 python scripts/train_tdncnn.py --dataset imagenet100 --list-runs
+python scripts/train_drunet.py --dataset imagenet100 --list-runs
+python scripts/train_drunet.py --dataset imagenet100 --dry-run
+python scripts/evaluate_external.py --help
+python scripts/prepare_external_benchmarks.py
 python scripts/generate_research_plots.py --dataset cifar10 --stage filtering --strict false
 python scripts/generate_research_plots.py --dataset imagenet100 --stage filtering --strict false
 ```
 
-Do not run full encoder training, latent-DDPM training, full score validation, full filtering, or TDnCNN training as infrastructure verification.
+Do not run full encoder training, latent-DDPM training, full score validation, full filtering, TDnCNN training, DRUNet training, or full external benchmark evaluation as infrastructure verification.

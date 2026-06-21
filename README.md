@@ -1,6 +1,6 @@
 # Score-Based Filtering in Latent Diffusion Pipelines
 
-Research pipeline for encoder training, latent-DDPM score estimation, score-based training-data filtering, and downstream TDnCNN denoising validation.
+Research pipeline for encoder training, latent-DDPM score estimation, score-based training-data filtering, and downstream denoising validation with TDnCNN and DRUNet.
 
 The project supports dataset-scoped experiments for `mnist`, `cifar10`, and `imagenet100`. The active ImageNet-derived benchmark is `imagenet100`.
 
@@ -12,7 +12,8 @@ Encoder Training
 -> Baseline vs Induced Latent-DDPM
 -> Score Validation
 -> Score-Based Filtering
--> TDnCNN Downstream Validation
+-> Downstream Denoising Validation (TDnCNN / DRUNet)
+-> External Benchmark Evaluation
 -> Research Artifacts
 ```
 
@@ -124,6 +125,28 @@ python scripts/train_tdncnn.py --dataset imagenet100 --run full
 python scripts/train_tdncnn.py --dataset imagenet100 --run topk_10
 ```
 
+Run DRUNet downstream validation:
+
+```bash
+python scripts/train_drunet.py --dataset imagenet100 --list-runs
+python scripts/train_drunet.py --dataset imagenet100 --dry-run
+python scripts/train_drunet.py --dataset imagenet100 --run quantile10_sigma25 --data-root /workspace/data
+python scripts/train_drunet.py --dataset imagenet100 --run topk10_sigma25 --data-root /workspace/data
+python scripts/train_drunet.py --dataset imagenet100 --run full_sigma25 --data-root /workspace/data
+```
+
+DRUNet uses the official DPIR `UNetRes` through `OfficialDRUNetAdapter`. The project API remains `forward(x, sigma=None)`, while the adapter internally concatenates the RGB image with a noise-level map. The production DRUNet protocol uses fixed image-denoising noise `sigma=25/255`, batch size `64`, Adam with learning rate `1e-4`, and 15 epochs.
+
+Evaluate trained DRUNet checkpoints on external denoising benchmarks:
+
+```bash
+python scripts/prepare_external_benchmarks.py
+python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth --dataset Kodak24 --sigma 25
+python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth --all-benchmarks --sigma 25
+```
+
+External benchmarks are read-only folders under `data/external_benchmarks/{Kodak24,CBSD68,Urban100}`. Evaluation uses original image resolution, on-the-fly Gaussian noise, and DRUNet inference with padding to multiples of 8.
+
 ## Filtering Modes
 
 The default filtering config runs `top_k` and `quantile` filtering at `5%`, `10%`, and `15%`.
@@ -161,7 +184,7 @@ python scripts/generate_research_plots.py --dataset imagenet100 --stage filterin
 python scripts/generate_research_plots.py --dataset imagenet100 --stage tdncnn
 ```
 
-Generated artifacts include score-distribution figures, selected/rejected sample grids, DDPM training dynamics when available, TDnCNN metric comparisons, summary tables, and qualitative denoising examples.
+Generated artifacts include score-distribution figures, selected/rejected sample grids, DDPM training dynamics when available, downstream metric comparisons, summary tables, and qualitative denoising examples.
 
 Outputs are saved under:
 
@@ -170,9 +193,11 @@ experiments/<dataset>/exp_005_filtering/plots/research_style/
 experiments/<dataset>/exp_003_latent_ddpm_validation/plots/research_style/
 experiments/<dataset>/exp_006_tdncnn/comparison_plots/research_style/
 experiments/<dataset>/exp_006_tdncnn/qualitative/research_style/
+experiments/<dataset>/exp_007_drunet/
+experiments/external_benchmarks/
 ```
 
-Required inputs are existing `scores.csv`, `selected_indices.npy`, filtering grids, DDPM `DDPM_metrics.csv` or optional `score_training_dynamics.csv`, and TDnCNN `results/per_image_metrics.csv`. Missing inputs are skipped with warnings when `--strict false`.
+Required inputs are existing `scores.csv`, `selected_indices.npy`, filtering grids, DDPM `DDPM_metrics.csv` or optional `score_training_dynamics.csv`, and downstream `results/per_image_metrics.csv` files from TDnCNN or DRUNet runs. Missing inputs are skipped with warnings when `--strict false`.
 
 ## Docker
 
@@ -203,6 +228,7 @@ ImageNet-100 DGX scripts are provided for reproducible manual launches:
 scripts/run_imagenet100_dgx_smoke.sh
 scripts/run_imagenet100_full.sh
 scripts/run_imagenet100_downstream_grid.sh
+scripts/run_drunet_imagenet100_production.sh
 ```
 
 They are intended to be inspected before execution and run manually inside the prepared environment.

@@ -1,0 +1,31 @@
+dataset: imagenet100
+experiment_name: topk10_sigma25
+mode: filtered
+selected_indices: experiments/imagenet100/exp_005_filtering/topk/10/selected_indices.npy
+data_root: /workspace/data
+output_dir: experiments/imagenet100/exp_007_drunet/topk10_sigma25
+checkpoint_path: checkpoints/imagenet100/drunet/topk10_sigma25.pth
+
+noise:
+  protocol: fixed_sigma
+  sigma: 0.09803921568627451  # 25 / 255
+
+training:
+  epochs: 15
+  batch_size: 64
+  optimizer: Adam
+  learning_rate: 1.0e-4
+  weight_decay: 0.0
+  scheduler: null
+  seed: 42
+  num_workers: 0
+
+model:
+  implementation: official_dpir_unetres
+  in_channels: 3
+  forward_api: forward(x, sigma=None)
+  nc: [64, 128, 256, 512]
+  nb: 4
+  act_mode: R
+  downsample_mode: strideconv
+  upsample_mode: convtranspose
