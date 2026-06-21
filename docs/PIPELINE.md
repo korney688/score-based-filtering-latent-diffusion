@@ -467,9 +467,9 @@ Expected read-only dataset root:
 
 ```text
 data/external_benchmarks/
-├── Kodak24/
-├── CBSD68/
-└── Urban100/
+|-- Kodak24/
+|-- CBSD68/
+`-- Urban100/
 ```
 
 Dataset preparation/validation utility:
@@ -499,6 +499,41 @@ python scripts/evaluate_external.py \
   --sigma 25
 ```
 
+Production checkpoints evaluated by this stage:
+
+```text
+checkpoints/imagenet100/drunet/full_sigma25.pth
+checkpoints/imagenet100/drunet/topk10_sigma25.pth
+checkpoints/imagenet100/drunet/quantile10_sigma25.pth
+```
+
+Publication comparison commands:
+
+```bash
+python scripts/evaluate_external.py \
+  --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth \
+  --all-benchmarks \
+  --sigma 25
+
+python scripts/evaluate_external.py \
+  --checkpoint checkpoints/imagenet100/drunet/topk10_sigma25.pth \
+  --all-benchmarks \
+  --sigma 25
+
+python scripts/evaluate_external.py \
+  --checkpoint checkpoints/imagenet100/drunet/quantile10_sigma25.pth \
+  --all-benchmarks \
+  --sigma 25
+```
+
+The resulting comparison covers:
+
+```text
+Kodak24  x Full / Top-K 10% / Quantile-spread 10%
+CBSD68   x Full / Top-K 10% / Quantile-spread 10%
+Urban100 x Full / Top-K 10% / Quantile-spread 10%
+```
+
 Noise protocol:
 
 - Gaussian noise generated on the fly;
@@ -526,22 +561,22 @@ Artifacts:
 
 ```text
 experiments/external_benchmarks/<checkpoint_name>/
-├── summary.json
-├── Kodak24/
-│   ├── metrics.csv
-│   ├── summary.json
-│   ├── report.md
-│   └── qualitative/
-├── CBSD68/
-│   ├── metrics.csv
-│   ├── summary.json
-│   ├── report.md
-│   └── qualitative/
-└── Urban100/
-    ├── metrics.csv
-    ├── summary.json
-    ├── report.md
-    └── qualitative/
+|-- summary.json
+|-- Kodak24/
+|   |-- metrics.csv
+|   |-- summary.json
+|   |-- report.md
+|   `-- qualitative/
+|-- CBSD68/
+|   |-- metrics.csv
+|   |-- summary.json
+|   |-- report.md
+|   `-- qualitative/
+`-- Urban100/
+    |-- metrics.csv
+    |-- summary.json
+    |-- report.md
+    `-- qualitative/
 ```
 
 Qualitative outputs include ground truth, noisy input, denoised output, and an absolute error map for representative images.

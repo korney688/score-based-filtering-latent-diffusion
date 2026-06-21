@@ -145,7 +145,15 @@ python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/
 python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth --all-benchmarks --sigma 25
 ```
 
-External benchmarks are read-only folders under `data/external_benchmarks/{Kodak24,CBSD68,Urban100}`. Evaluation uses original image resolution, on-the-fly Gaussian noise, and DRUNet inference with padding to multiples of 8.
+External benchmarks are read-only folders under `data/external_benchmarks/{Kodak24,CBSD68,Urban100}`. The external stage evaluates already trained DRUNet checkpoints for `full_sigma25`, `topk10_sigma25`, and `quantile10_sigma25`; it does not retrain models or rerun filtering. Evaluation uses original image resolution, on-the-fly Gaussian noise, and DRUNet inference with padding to multiples of 8. Each benchmark run writes `metrics.csv`, `summary.json`, `report.md`, and qualitative images under `experiments/external_benchmarks/<checkpoint_name>/<benchmark>/`.
+
+Typical external benchmark commands:
+
+```bash
+python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/full_sigma25.pth --all-benchmarks --sigma 25
+python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/topk10_sigma25.pth --all-benchmarks --sigma 25
+python scripts/evaluate_external.py --checkpoint checkpoints/imagenet100/drunet/quantile10_sigma25.pth --all-benchmarks --sigma 25
+```
 
 ## Filtering Modes
 
