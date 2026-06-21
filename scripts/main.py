@@ -13,7 +13,7 @@ for path in (PROJECT_ROOT, SCRIPTS_DIR):
         sys.path.append(str(path))
 
 from filter_dataset import filter_dataset
-from train_ddpm import run_train_DDPM
+from train_DDPM import run_train_DDPM
 
 sys.path.append(os.getcwd())
 
