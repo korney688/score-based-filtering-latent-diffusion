@@ -260,7 +260,7 @@ Filtering modes:
 - `top_k`: selects the lowest-score samples globally. Lower score means a more typical sample for the current score definition.
 - `quantile`: performs stratified sampling over score quantile bins, selecting the configured fraction from each bin. This preserves score-distribution coverage and avoids collapsing the subset into only the lowest-score region.
 
-The active `quantile` mode is not a single quantile interval. It is a QQ-spread / stratified quantile sampling strategy inherited from the laboratory filtering protocol. Legacy `quantile_low` and `quantile_high` config fields are kept only for compatibility and are not used by active `filter_mode=quantile`.
+The active `quantile` mode is not a single quantile interval. It is a QQ-spread / stratified quantile sampling strategy inherited from the reference filtering protocol. Legacy `quantile_low` and `quantile_high` config fields are kept only for compatibility and are not used by active `filter_mode=quantile`.
 
 ImageNet-100 commands:
 
@@ -693,19 +693,19 @@ quantile10_sigma25
 topk10_sigma25
 ```
 
-Image-domain mapping from the wireless report:
+Image-domain mapping from the original MIMO-oriented report concepts:
 
 ```text
-Lab SNR distribution plots
+SNR distribution plots
 -> score distribution plots
 
-Lab score/SNR dynamics over DDPM training
+Score/SNR dynamics over DDPM training
 -> score/latent dynamics over latent-DDPM training
 
-Lab capacity CDF and gap comparison
+Capacity CDF and gap comparison
 -> PSNR/MSE/SSIM/LPIPS CDF and gap comparison
 
-Lab PDP/PAP diversity examples
+PDP/PAP diversity examples
 -> selected/rejected image examples and denoising/error-map grids
 ```
 

@@ -62,6 +62,6 @@ score_stats:
     score_stat_seed: 42
     score_stat_every_n_epochs: 1
 
-# Build the DDPM/encoder stack and run a dummy forward without loading a real dataset.
+# Build the DDPM/encoder stack and run a synthetic forward pass without loading a real dataset.
 # Intended only for quick multi-dataset smoke checks.
 smoke_model_only: false

@@ -7,11 +7,11 @@ from src.external.drunet.network_unet import UNetRes
 
 
 class DRUNetPlaceholder(nn.Module):
-    """Interface-compatible placeholder for the official DRUNet implementation.
+    """Lightweight DRUNet-compatible model for smoke checks.
 
-    The project does not vendor external DRUNet code automatically. This module
-    provides the downstream API and tensor contract so run/config/evaluation
-    infrastructure can be validated before manually importing the official model.
+    Production runs use ``OfficialDRUNetAdapter``. This fallback keeps the same
+    public API so command-line plumbing and dataloader construction can be
+    validated without instantiating the full network.
     """
 
     is_placeholder = True
@@ -36,8 +36,8 @@ class DRUNetPlaceholder(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
-        # Official DRUNet is noise-level conditioned. The placeholder accepts the
-        # same optional argument but does not use it.
+        # Keep the same signature as the official adapter; this fallback is not
+        # noise-level conditioned.
         residual = self.net(x)
         return x - residual
 
@@ -136,7 +136,7 @@ def build_drunet(
 ) -> nn.Module:
     """Build a DRUNet-compatible denoiser.
 
-    ``official=False`` keeps the lightweight placeholder for plumbing checks.
+    ``official=False`` keeps the lightweight fallback for smoke checks.
     ``official=True`` builds the official DPIR UNetRes behind a project API
     adapter that accepts ``forward(x, sigma=None)``.
     """

@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--allow-placeholder-training",
         action="store_true",
-        help="Allow training the placeholder model. Intended only for local plumbing tests.",
+        help="Allow training the lightweight fallback model. Intended only for local plumbing tests.",
     )
     return parser.parse_args()
 
@@ -150,7 +150,7 @@ def main() -> None:
 
     if getattr(model, "is_placeholder", False) and not args.allow_placeholder_training:
         raise RuntimeError(
-            "DRUNet currently uses a placeholder model. Manual official DRUNet import is required before training. "
+            "This run resolved to the lightweight fallback model, which is not intended for production training. "
             "Use --dry-run, --init-model, or --init-dataloader for smoke checks."
         )
 
