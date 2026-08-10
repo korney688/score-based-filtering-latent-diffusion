@@ -4,8 +4,10 @@ import os
 from pathlib import Path
 from typing import Any
 
+import torch
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
+from torchvision.transforms import functional as TF
 
 
 DATASET_SPECS: dict[str, dict[str, Any]] = {
@@ -26,6 +28,24 @@ DATASET_SPECS: dict[str, dict[str, Any]] = {
         "mean": (0.5, 0.5, 0.5),
         "std": (0.5, 0.5, 0.5),
         "display_name": "CIFAR-10",
+    },
+    "mnist_noisy_gaussian": {
+        "torchvision_class": datasets.MNIST,
+        "channels": 1,
+        "image_size": 28,
+        "train_size": 60000,
+        "mean": (0.5,),
+        "std": (0.5,),
+        "display_name": "MNIST noisy Gaussian",
+    },
+    "mnist_noisy_poisson_gaussian": {
+        "torchvision_class": datasets.MNIST,
+        "channels": 1,
+        "image_size": 28,
+        "train_size": 60000,
+        "mean": (0.5,),
+        "std": (0.5,),
+        "display_name": "MNIST noisy Poisson-Gaussian",
     },
     "imagenet100": {
         "torchvision_class": None,
@@ -86,6 +106,191 @@ def _cfg_get(dataset_cfg: Any | None, key: str, default: Any) -> Any:
 def _cfg_sequence(dataset_cfg: Any | None, key: str, default: tuple[float, ...]) -> tuple[float, ...]:
     value = _cfg_get(dataset_cfg, key, default)
     return tuple(float(item) for item in value)
+
+
+def _cfg_mapping(dataset_cfg: Any | None, key: str) -> dict[str, Any]:
+    value = _cfg_get(dataset_cfg, key, {})
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    return dict(value)
+
+
+def load_dataset_config(slug: str, project_root: str | Path | None = None) -> dict[str, Any]:
+    from omegaconf import OmegaConf
+
+    root = Path(project_root or Path(__file__).resolve().parents[1])
+
+    if not OmegaConf.has_resolver("hydra"):
+        OmegaConf.register_new_resolver(
+            "hydra",
+            lambda key: str(root) if key == "runtime.cwd" else "",
+            use_cache=False,
+        )
+
+    config_path = root / "configs" / "dataset" / f"{slug}.yaml"
+    cfg = OmegaConf.load(config_path)
+    wrapped = OmegaConf.create({"dataset": cfg})
+    dataset_cfg = OmegaConf.to_container(wrapped.dataset, resolve=True)
+    if not isinstance(dataset_cfg, dict):
+        raise TypeError(f"Dataset config must be a mapping: {config_path}")
+    return dataset_cfg
+
+
+def apply_dataset_runtime_overrides(
+    dataset_cfg: dict[str, Any],
+    *,
+    mode: str | None = None,
+    corruption: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if mode is not None:
+        dataset_cfg["dataset_mode"] = mode
+    if corruption:
+        dataset_cfg.setdefault("corruption", {})
+        dataset_cfg["corruption"].update(corruption)
+    return dataset_cfg
+
+
+def _normalize_tensor(x: torch.Tensor, mean: tuple[float, ...], std: tuple[float, ...]) -> torch.Tensor:
+    mean_tensor = torch.tensor(mean, dtype=x.dtype).view(-1, 1, 1)
+    std_tensor = torch.tensor(std, dtype=x.dtype).view(-1, 1, 1)
+    return (x - mean_tensor) / std_tensor
+
+
+def dataset_mode(dataset_cfg: Any | None = None) -> str:
+    return str(_cfg_get(dataset_cfg, "dataset_mode", "clean")).strip().lower().replace("-", "_")
+
+
+def _canonical_corruption_cfg(dataset_cfg: Any | None, train: bool) -> dict[str, Any] | None:
+    mode = dataset_mode(dataset_cfg)
+    if mode not in {"clean", "noisy"}:
+        raise ValueError(f"Unsupported dataset_mode: {mode}. Supported: clean, noisy.")
+
+    if mode == "noisy":
+        corruption_cfg = _cfg_mapping(dataset_cfg, "corruption")
+        if not bool(corruption_cfg.get("enabled", False)):
+            return None
+        apply_to = str(corruption_cfg.get("apply_to", "all")).lower()
+        if apply_to != "all" and not (train and apply_to == "train") and not ((not train) and apply_to in {"val", "test"}):
+            return None
+        return corruption_cfg
+
+    # Backward-compatible support for older MNIST noisy configs without creating
+    # a separate ImageNet-100 dataset mode.
+    if bool(_cfg_get(dataset_cfg, "noisy_dataset", False)):
+        noise_cfg = _cfg_mapping(dataset_cfg, "noise")
+        apply_to = str(noise_cfg.get("apply_to", "train")).lower()
+        if apply_to == "all" or (train and apply_to == "train") or ((not train) and apply_to in {"val", "test"}):
+            return noise_cfg
+    return None
+
+
+def corruption_enabled(dataset_cfg: Any | None, train: bool) -> bool:
+    return _canonical_corruption_cfg(dataset_cfg, train) is not None
+
+
+class PoissonGaussianCorruption:
+    def __init__(
+        self,
+        poisson_scale: float = 30.0,
+        gaussian_sigma: float = 0.01,
+        *,
+        clip: bool = True,
+    ) -> None:
+        if poisson_scale <= 0:
+            raise ValueError(f"poisson_scale must be positive, got {poisson_scale}")
+        if gaussian_sigma < 0:
+            raise ValueError(f"gaussian_sigma must be non-negative, got {gaussian_sigma}")
+        self.poisson_scale = float(poisson_scale)
+        self.gaussian_sigma = float(gaussian_sigma)
+        self.clip = bool(clip)
+
+    @classmethod
+    def from_config(cls, cfg: dict[str, Any]) -> "PoissonGaussianCorruption":
+        kind = str(cfg.get("type", cfg.get("kind", "poisson_gaussian"))).lower().replace("-", "_")
+        if kind != "poisson_gaussian":
+            raise ValueError(f"Unsupported corruption type: {kind}. Supported: poisson_gaussian.")
+        poisson_scale = float(cfg.get("poisson_scale", cfg.get("poisson_peak", cfg.get("peak", 30.0))))
+        gaussian_sigma = float(cfg.get("gaussian_sigma", 0.01))
+        return cls(
+            poisson_scale=poisson_scale,
+            gaussian_sigma=gaussian_sigma,
+            clip=bool(cfg.get("clip", True)),
+        )
+
+    def __call__(self, image: torch.Tensor | Any, generator: torch.Generator | None = None) -> torch.Tensor:
+        if isinstance(image, torch.Tensor):
+            x = image.to(torch.float32)
+            if x.numel() > 0 and float(x.max()) > 1.0:
+                x = x / 255.0
+        else:
+            x = TF.to_tensor(image)
+        x = x.clamp(0.0, 1.0)
+
+        poisson = torch.poisson(x * self.poisson_scale, generator=generator) / self.poisson_scale
+        gaussian = torch.randn(poisson.shape, generator=generator, dtype=poisson.dtype) * self.gaussian_sigma
+        corrupted = poisson + gaussian
+        if self.clip:
+            corrupted = corrupted.clamp(0.0, 1.0)
+        return corrupted.to(torch.float32)
+
+
+class CorruptedDataset(Dataset):
+    def __init__(
+        self,
+        dataset: Dataset,
+        *,
+        dataset_cfg: Any | None,
+        corruption_cfg: dict[str, Any],
+        spec: dict[str, Any],
+        transform_profile: str,
+        return_clean_target: bool = False,
+    ) -> None:
+        self.dataset = dataset
+        self.corruption_cfg = corruption_cfg
+        self.corruption = PoissonGaussianCorruption.from_config(corruption_cfg)
+        self.transform_profile = transform_profile
+        self.mean = _cfg_sequence(dataset_cfg, "mean", spec["mean"])
+        self.std = _cfg_sequence(dataset_cfg, "std", spec["std"])
+        self.return_clean_target = return_clean_target
+        self.seed = int(corruption_cfg.get("seed", 42))
+
+        for attr in ("classes", "class_to_idx", "targets"):
+            if hasattr(dataset, attr):
+                setattr(self, attr, getattr(dataset, attr))
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, index: int):
+        sample = self.dataset[index]
+        if isinstance(sample, (tuple, list)):
+            x_clean, label = sample[0], sample[1]
+        else:
+            x_clean, label = sample, None
+
+        if not isinstance(x_clean, torch.Tensor):
+            x_clean = TF.to_tensor(x_clean)
+        x_clean = x_clean.to(torch.float32).clamp(0.0, 1.0)
+
+        generator = torch.Generator().manual_seed(self.seed + int(index))
+        x_noisy = self.corruption(x_clean, generator=generator)
+        if self.transform_profile == "normalized":
+            x_out = _normalize_tensor(x_noisy, self.mean, self.std)
+        elif self.transform_profile == "tensor":
+            x_out = x_noisy
+        else:
+            raise ValueError(f"Unsupported transform_profile: {self.transform_profile}")
+
+        if self.return_clean_target:
+            return x_out.to(torch.float32), x_clean.to(torch.float32)
+        if label is None:
+            return x_out.to(torch.float32)
+        return x_out.to(torch.float32), label
+
+
+PhysicallyNoisyDataset = CorruptedDataset
 
 
 def _normalized_transform(dataset_cfg: Any | None, spec: dict[str, Any]):
@@ -156,9 +361,14 @@ def build_torchvision_split(
     data_root: str | Path,
     transform_profile: str = "normalized",
     download: bool = False,
+    return_clean_for_corruption: bool = False,
 ) -> Dataset:
     spec = dataset_spec(dataset_cfg)
-    if transform_profile == "normalized":
+    corruption_cfg = _canonical_corruption_cfg(dataset_cfg, train)
+    use_corruption = corruption_cfg is not None
+    if use_corruption:
+        transform = transforms.ToTensor()
+    elif transform_profile == "normalized":
         transform = _normalized_transform(dataset_cfg, spec)
     elif transform_profile == "tensor":
         transform = transforms.ToTensor()
@@ -171,14 +381,38 @@ def build_torchvision_split(
                 f"{spec['display_name']} download is not supported. "
                 f"Place local data under data/{spec.get('folder_name', dataset_name(dataset_cfg))}/."
             )
-        transform = _imagefolder_transform(dataset_cfg, spec, normalized=transform_profile == "normalized")
+        transform = _imagefolder_transform(
+            dataset_cfg,
+            spec,
+            normalized=False if use_corruption else transform_profile == "normalized",
+        )
         split_root = _imagefolder_split_root(data_root, train=train, dataset_cfg=dataset_cfg, spec=spec)
-        return datasets.ImageFolder(root=split_root, transform=transform)
+        dataset = datasets.ImageFolder(root=split_root, transform=transform)
+        if use_corruption:
+            return CorruptedDataset(
+                dataset,
+                dataset_cfg=dataset_cfg,
+                corruption_cfg=corruption_cfg,
+                spec=spec,
+                transform_profile=transform_profile,
+                return_clean_target=return_clean_for_corruption,
+            )
+        return dataset
 
     dataset_cls = spec["torchvision_class"]
-    return dataset_cls(
+    dataset = dataset_cls(
         root=Path(data_root),
         train=train,
         download=download,
         transform=transform,
     )
+    if use_corruption:
+        return CorruptedDataset(
+            dataset,
+            dataset_cfg=dataset_cfg,
+            corruption_cfg=corruption_cfg,
+            spec=spec,
+            transform_profile=transform_profile,
+            return_clean_target=return_clean_for_corruption,
+        )
+    return dataset

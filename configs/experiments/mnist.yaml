@@ -1,0 +1,131 @@
+dataset:
+  name: mnist
+  torchvision_name: MNIST
+  data_root: data
+  download: false
+  channels: 1
+  image_size: 28
+  num_classes: 10
+
+experiment:
+  root: experiments/mnist
+  run_id: mnist_001
+
+protocol:
+  domain: image
+  corruption:
+    type: gaussian
+    mode: per_image
+    parameterization: target_psnr
+    target_psnr_min_db: 10.0
+    target_psnr_max_db: 40.0
+    deterministic: true
+  score:
+    statistic: epsilon_l2_squared
+    direction: higher_score_means_stronger_degradation
+  filtering:
+    methods: [full, topk, quantile_spread, random]
+
+seeds:
+  corpus_seed: 42
+  split_seed: 42
+  model_seed: 42
+  forward_noise_seed: 777
+  subset_seed: 42
+  task_noise_seed: 4242
+  eval_noise_seed: 4242
+  bootstrap_seed: 123
+
+corpus:
+  version: variable_awgn_psnr10_40_v1
+  target_psnr_min_db: 10.0
+  target_psnr_max_db: 40.0
+
+ddpm:
+  prediction_type: epsilon
+  T: 1000
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02
+  base_dim: 16
+  depth: 2
+  lr: 0.0001
+  batch_size: 128
+  epochs: 20
+  max_optimizer_steps: null
+  checkpoint_interval: 1
+
+score_validation:
+  samples_per_class: 20
+  validation_corpus_samples_per_class: 50
+  psnr_ladder: [10, 15, 20, 25, 30, 35, 40]
+  timestep_grid: [1, 2, 5, 10, 20, 50, 100, 200, 500]
+  checkpoint_epochs: all
+  coarse_mc_k: 4
+  final_mc_k: 16
+  final_candidate_count: 3
+  bootstrap_iterations: 200
+  topk_ratio: 0.10
+  min_ci_lower: 0.0
+  min_topk_psnr_shift: 0.0
+  min_class_coverage: 0.95
+  close_metric_epsilon: 0.005
+  oracle_scores_for_smoke: true
+
+filtering:
+  ratio: 0.10
+  topk_direction: minimum_score
+  random_seed: 42
+  quantile_min_points_per_bin: 30
+  include_topk5: false
+
+downstream:
+  model: TDnCNN
+  batch_size: 128
+  max_optimizer_steps: 2000
+  lr: 0.001
+  validation_fraction: 0.10
+  validation_seed: 43
+  validation_interval_steps: 100
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    mode: min
+    patience: 10
+    min_delta: 0.0001
+    warmup_steps: 100
+  checkpoint_interval_steps: 200
+  task_noise:
+    kind: awgn_uniform_sigma
+    sigma_min: 0.1
+    sigma_max: 0.8
+    version: mnist_task_awgn_v1
+
+evaluation:
+  batch_size: 256
+  eval_noise:
+    kind: awgn_uniform_sigma
+    sigma_min: 0.1
+    sigma_max: 0.8
+    version: mnist_eval_awgn_v1
+
+smoke:
+  synthetic: true
+  train_samples_per_class: 4
+  test_samples_per_class: 2
+  score_samples_per_class: 2
+  validation_corpus_samples_per_class: 2
+  ddpm_epochs: 1
+  ddpm_max_optimizer_steps: 2
+  ddpm_batch_size: 8
+  timestep_grid: [1, 100]
+  checkpoint_epochs: [1]
+  coarse_mc_k: 1
+  final_mc_k: 1
+  final_candidate_count: 1
+  min_class_coverage: 0.10
+  downstream_max_optimizer_steps: 2
+  downstream_batch_size: 8
+  downstream_validation_interval_steps: 1
+  downstream_early_stopping_patience: 2
+  downstream_early_stopping_warmup_steps: 0

@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from src.dataset_registry import build_torchvision_split
+from src.dataset_registry import build_torchvision_split, corruption_enabled
 
 
 class OnlineNoisyDataset(Dataset):
@@ -42,15 +42,18 @@ def build_dataset_split(
     train: bool,
     data_root: str | Path,
     dataset_name: str = "mnist",
+    dataset_cfg=None,
     download: bool = False,
+    return_clean_for_corruption: bool = False,
 ) -> Dataset:
     # TDnCNN works directly on clean images in [0, 1].
     return build_torchvision_split(
-        dataset_cfg=dataset_name,
+        dataset_cfg=dataset_cfg or dataset_name,
         train=train,
         data_root=Path(data_root),
         transform_profile="tensor",
         download=download,
+        return_clean_for_corruption=return_clean_for_corruption,
     )
 
 
@@ -80,6 +83,7 @@ def create_dataloaders(
     seed: int = 42,
     data_root: str | Path = "data",
     dataset_name: str = "mnist",
+    dataset_cfg=None,
     download: bool = False,
     sigma_min: float = 0.1,
     sigma_max: float = 0.8,
@@ -91,8 +95,25 @@ def create_dataloaders(
     if mode not in {"full", "filtered"}:
         raise ValueError(f"Unsupported mode: {mode}")
 
-    train_base = build_dataset_split(train=True, data_root=data_root, dataset_name=dataset_name, download=download)
-    test_base = build_dataset_split(train=False, data_root=data_root, dataset_name=dataset_name, download=download)
+    train_uses_dataset_corruption = corruption_enabled(dataset_cfg or dataset_name, train=True)
+    test_uses_dataset_corruption = corruption_enabled(dataset_cfg or dataset_name, train=False)
+
+    train_base = build_dataset_split(
+        train=True,
+        data_root=data_root,
+        dataset_name=dataset_name,
+        dataset_cfg=dataset_cfg,
+        download=download,
+        return_clean_for_corruption=train_uses_dataset_corruption,
+    )
+    test_base = build_dataset_split(
+        train=False,
+        data_root=data_root,
+        dataset_name=dataset_name,
+        dataset_cfg=dataset_cfg,
+        download=download,
+        return_clean_for_corruption=test_uses_dataset_corruption,
+    )
 
     loaded_filtered_indices = load_filtered_indices(filtered_indices)
     if mode == "filtered":
@@ -103,8 +124,16 @@ def create_dataloaders(
     train_base = limit_dataset(train_base, max_train_samples)
     test_base = limit_dataset(test_base, max_test_samples)
 
-    train_dataset = OnlineNoisyDataset(train_base, sigma_min=sigma_min, sigma_max=sigma_max)
-    test_dataset = OnlineNoisyDataset(test_base, sigma_min=sigma_min, sigma_max=sigma_max)
+    train_dataset = (
+        train_base
+        if train_uses_dataset_corruption
+        else OnlineNoisyDataset(train_base, sigma_min=sigma_min, sigma_max=sigma_max)
+    )
+    test_dataset = (
+        test_base
+        if test_uses_dataset_corruption
+        else OnlineNoisyDataset(test_base, sigma_min=sigma_min, sigma_max=sigma_max)
+    )
 
     generator = torch.Generator()
     generator.manual_seed(seed)

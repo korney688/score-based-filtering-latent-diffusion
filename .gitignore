@@ -30,7 +30,12 @@ data/
 # Training outputs and artifacts
 checkpoints/
 experiments/
+!configs/experiments/
+!configs/experiments/**
 outputs/
+cache/
+tmp/
+reports/
 models/
 runs/
 wandb/
@@ -67,12 +72,8 @@ mlruns/
 *.html
 .ipynb_checkpoints/
 
-# Project documentation policy for the public repo
-*.md
-!README.md
-!docs/
-docs/*.md
-!docs/PIPELINE.md
+# Project documentation is tracked. Generated reports inside ignored
+# experiment/tmp/output roots stay ignored through their parent folders.
 
 # Local archival folders
 archive_legacy/

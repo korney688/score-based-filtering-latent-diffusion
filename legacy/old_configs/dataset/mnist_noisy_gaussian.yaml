@@ -1,0 +1,52 @@
+defaults:
+  - _self_
+
+slug: mnist_noisy_gaussian
+name: MNIST Noisy Gaussian
+torchvision_name: MNIST
+channels: 1
+in_channels: 1
+out_channels: 1
+image_size: 28
+num_classes: 10
+mean: [0.5]
+std: [0.5]
+download: false
+
+noisy_dataset: true
+noise:
+  kind: gaussian
+  sigma: 0.1
+  seed: 42
+  apply_to: train
+  clip: true
+
+encoder:
+  name: noise_consistency_small
+  latent_dim: 16
+  checkpoint_run: noise_consistency_small_latent16
+
+encoder_validation:
+  candidates:
+    noise_consistency:
+      kind: noise_consistency
+      architecture: noise_consistency_small
+      latent_dim: 16
+      checkpoint_run: noise_consistency_small_latent16
+
+latent_ddpm_validation:
+  runs:
+    baseline:
+      latent_noise_mode: baseline
+      checkpoint_run: latent_ddpm_baseline_ae_noise_consistency_mnist_noisy_gaussian
+    induced:
+      latent_noise_mode: induced
+      checkpoint_run: latent_ddpm_induced_ae_noise_consistency_mnist_noisy_gaussian
+
+paths:
+  data_root: ${hydra:runtime.cwd}/data
+  experiments_root: ${hydra:runtime.cwd}/experiments/noisy_dataset/mnist_gaussian
+  outputs_root: ${dataset.paths.experiments_root}/outputs
+  checkpoints_root: ${dataset.paths.experiments_root}/checkpoints
+  autoencoder_root: ${dataset.paths.checkpoints_root}/autoencoders
+  ddpm_root: ${dataset.paths.checkpoints_root}/ddpm

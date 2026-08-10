@@ -12,6 +12,8 @@ __pycache__
 data/
 checkpoints/
 experiments/
+!configs/experiments/
+!configs/experiments/**
 outputs/
 logs/
 notebooks/

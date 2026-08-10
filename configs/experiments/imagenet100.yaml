@@ -1,0 +1,185 @@
+dataset:
+  name: imagenet100
+  type: imagefolder
+  root: data/imagenet100
+  auto_download: false
+  allow_count_mismatch: false
+  channels: 3
+  image_size: 64
+  num_classes: 100
+  expected_train_samples: 130000
+  expected_val_samples: 5000
+
+runtime:
+  num_workers: 4
+
+seeds:
+  dataset_seed: 20260809
+  corpus_seed: 42
+  split_seed: 314159
+  ladder_seed: 271828
+  model_seed: 42
+  forward_noise_seed: 777
+  subset_seed: 42
+  task_noise_seed: 4242
+
+corpus:
+  version: variable_awgn_psnr10_40_v1
+  target_psnr_min_db: 10.0
+  target_psnr_max_db: 40.0
+
+ddpm:
+  prediction_type: epsilon
+  T: 1000
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02
+  base_dim: 64
+  depth: 3
+  base_dim_smoke: 4
+  depth_smoke: 1
+  lr: 0.0001
+  batch_size: 64
+  batch_size_smoke: 4
+  epochs: 40
+  epochs_smoke: 1
+  checkpoint_interval: 1
+  amp: true
+
+score_validation:
+  samples_per_class: 8
+  samples_per_class_smoke: 2
+  validation_corpus_samples_per_class: 30
+  validation_corpus_samples: 3000
+  validation_corpus_samples_smoke: 12
+  batch_size: 64
+  psnr_ladder: [10, 15, 20, 25, 30, 35, 40]
+  checkpoint_scan:
+    epochs: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+             11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+             21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+             31, 32, 33, 34, 35, 36, 37, 38, 39, 40]
+    coarse_mode: all
+    refinement_window: 1
+    top_candidates: 3
+  timestep_scan:
+    report_timesteps: [1, 2, 5, 10, 20, 50, 100, 200, 500]
+  mc:
+    coarse_k: 4
+    final_k: 16
+  bootstrap_seed: 2026
+  bootstrap_iters: 1000
+  bootstrap_iters_smoke: 64
+
+score_selection:
+  close_metric_tolerance: 0.01
+  gates:
+    validation_coverage_large_corpus_min_samples: 3000
+    validation_min_class_coverage_large_corpus: 0.95
+    validation_small_corpus_rule: random_relative_coverage_and_distribution_divergence
+    validation_random_relative_coverage_tolerance: 0.05
+    validation_max_distribution_js_divergence: 0.20
+    min_class_coverage_smoke: 0.0
+    use_stability_as_tiebreaker: true
+
+filtering:
+  batch_size: 64
+  topk_ratio: 0.10
+  random_ratio: 0.10
+  quantile_ratio: 0.10
+  topk_direction: minimum_score
+  quantile_min_points_per_bin: 30
+  include_topk5: false
+  full_train_topk_requires_all_classes: true
+
+downstream:
+  model: TDnCNN
+  batch_size: 32
+  batch_size_smoke: 4
+  max_steps: 50000
+  max_steps_smoke: 2
+  lr: 0.001
+  validation_samples_per_class: 2
+  validation_interval_steps: 500
+  validation_interval_steps_smoke: 1
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    mode: min
+    patience: 10
+    patience_smoke: 2
+    min_delta: 0.0001
+    warmup_steps: 1000
+    warmup_steps_smoke: 0
+  task_noise:
+    kind: awgn_uniform_sigma
+    sigma_min: 0.1
+    sigma_max: 0.8
+    version: downstream_task_awgn_v1
+
+drunet:
+  model: DRUNet
+  official: true
+  official_smoke: false
+  features: 64
+  num_layers: 5
+  nc: [64, 128, 256, 512]
+  nb: 4
+  act_mode: R
+  downsample_mode: strideconv
+  upsample_mode: convtranspose
+  batch_size: 64
+  batch_size_smoke: 2
+  max_steps: 30480
+  max_steps_smoke: 1
+  lr: 0.0001
+  weight_decay: 0.0
+  validation_interval_steps: 500
+  validation_interval_steps_smoke: 1
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    mode: min
+    patience: 10
+    patience_smoke: 2
+    min_delta: 0.0001
+    warmup_steps: 1000
+    warmup_steps_smoke: 0
+
+evaluation:
+  batch_size: 32
+  lpips_enabled: true
+  eval_noise:
+    kind: fixed_awgn
+    sigma: 0.09803921568627451
+    seed: 42
+    version: internal_eval_awgn_sigma25_seed42_v1
+
+external_benchmarks:
+  root: data/external_benchmarks
+  benchmarks: [Kodak24, CBSD68, Urban100]
+  sigma: 25
+  seed: 42
+
+smoke:
+  classes: 4
+  samples_per_class: 4
+  ddpm_samples: 8
+  oracle_scores: true
+
+real_smoke:
+  train_samples_per_class: 1
+  val_samples_per_class: 1
+  ddpm_train_samples: 8
+  ddpm_optimizer_steps: 3
+  ddpm_batch_size: 2
+  score_validation_samples_per_class: 1
+  validation_corpus_samples_per_class: 1
+  timestep_grid: [1, 100]
+  mc_k: 1
+  final_candidates: 1
+  downstream_optimizer_steps: 1
+  downstream_batch_size: 2
+  evaluation_images: 6
+  external_images_per_benchmark: 1
+  relaxed_score_selection: true

@@ -1,0 +1,141 @@
+dataset:
+  name: cifar10
+  data_root: data
+  download: false
+  channels: 3
+  image_size: 32
+  num_classes: 10
+
+experiment:
+  root: experiments/cifar10
+  run_id: cifar10_001
+
+runtime:
+  num_workers: 0
+
+protocol:
+  domain: image
+  corruption:
+    type: gaussian
+    mode: per_image
+    parameterization: target_psnr
+    target_psnr_min_db: 10.0
+    target_psnr_max_db: 40.0
+    deterministic: true
+  ddpm:
+    prediction_target: epsilon
+  score:
+    statistic: epsilon_l2_squared
+  filtering:
+    methods: [full, topk, quantile_spread, random]
+
+seeds:
+  corpus_seed: 42
+  split_seed: 42
+  model_seed: 42
+  forward_noise_seed: 777
+  subset_seed: 42
+  bootstrap_seed: 123
+
+corruption:
+  type: gaussian
+  mode: per_image
+  parameterization: target_psnr
+  target_psnr_min_db: 10.0
+  target_psnr_max_db: 40.0
+
+ddpm:
+  domain: image
+  prediction_type: epsilon
+  T: 1000
+  beta_schedule: linear
+  beta_start: 0.0001
+  beta_end: 0.02
+  base_dim: 16
+  depth: 3
+  batch_size: 128
+  epochs: 40
+  checkpoint_interval: 1
+
+score_validation:
+  psnr_ladder: [10, 15, 20, 25, 30, 35, 40]
+  timestep_grid: [1, 2, 5, 10, 20, 50, 100, 200, 500]
+  checkpoint_epochs: all
+  coarse_mc_k: 4
+  final_mc_k: 16
+  final_candidate_count: 3
+  batch_size: 256
+  bootstrap_iterations: 1000
+  topk_ratio: 0.10
+
+score_selection:
+  gates:
+    bootstrap_ci_low_gt_0: true
+    topk_quality_shift_gt_0: true
+    expected_score_direction: true
+    class_coverage_rule: random_relative_or_absolute
+
+filtering:
+  ratio: 0.10
+  topk_ratio: 0.10
+  quantile_ratio: 0.10
+  random_ratio: 0.10
+  topk_direction: minimum_score
+  random_seed: 42
+  quantile_min_points_per_bin: 30
+  include_topk5: false
+
+downstream:
+  tdncnn:
+    batch_size: 32
+    max_optimizer_steps: null
+    lr: 0.001
+    validation_interval_steps: 500
+    early_stopping:
+      enabled: true
+      monitor: val_loss
+      mode: min
+      patience: 10
+      min_delta: 0.0001
+      warmup_steps: 1000
+  drunet:
+    batch_size: 64
+    max_optimizer_steps: null
+    lr: 0.0001
+    weight_decay: 0.0
+    status: enabled_for_new_current_image_space_selected_subsets
+    validation_interval_steps: 500
+    early_stopping:
+      enabled: true
+      monitor: val_loss
+      mode: min
+      patience: 10
+      min_delta: 0.0001
+      warmup_steps: 1000
+  task_noise:
+    kind: awgn_uniform_sigma
+    sigma_min: 0.1
+    sigma_max: 0.8
+    version: cifar10_current_task_awgn_v1
+
+evaluation:
+  batch_size: 128
+  eval_noise:
+    kind: awgn_uniform_sigma
+    sigma_min: 0.1
+    sigma_max: 0.8
+    seed: 42
+
+external:
+  benchmarks: [Kodak24, CBSD68, Urban100]
+  sigma: 25
+  seed: 42
+
+smoke:
+  enabled: false
+  downstream_max_optimizer_steps: 2
+  downstream_batch_size: 4
+  downstream_validation_interval_steps: 1
+  downstream_early_stopping_patience: 2
+  downstream_early_stopping_warmup_steps: 0
+  drunet_official: false
