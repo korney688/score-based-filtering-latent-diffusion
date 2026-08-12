@@ -18,12 +18,6 @@ src/
   cifar10_pipeline.py
   imagenet100_pipeline.py
   ddpm/image_space.py
-  evaluation/
+  filtering/selection.py
   utils/
-
-legacy/
-  encoder_pipeline/
-  latent_ddpm/
-  old_analysis/
-  old_launchers/
 ```

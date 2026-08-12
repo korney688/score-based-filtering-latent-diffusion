@@ -177,6 +177,88 @@ def stage_fail(stage: str, reason: str) -> None:
     print(f"[FAIL] {stage} | reason={reason}")
 
 
+def should_log_progress(current: int, total: int | None, interval: int | None) -> bool:
+    if current <= 1:
+        return True
+    if total is not None and current >= total:
+        return True
+    if interval is None or interval <= 0:
+        return False
+    return current % interval == 0
+
+
+def _fmt_metric(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(number):
+        return "nan"
+    return f"{number:.6f}"
+
+
+def _fmt_seconds(seconds: float | None) -> str:
+    if seconds is None or not math.isfinite(float(seconds)):
+        return "n/a"
+    seconds = max(0, int(round(float(seconds))))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def training_progress(
+    domain: str,
+    stage: str,
+    *,
+    unit: str,
+    current: int,
+    total: int | None = None,
+    train_loss: Any = None,
+    val_loss: Any = None,
+    best_val_loss: Any = None,
+    best_step: int | None = None,
+    patience_counter: int | None = None,
+    patience: int | None = None,
+    lr: Any = None,
+    start_time: float | None = None,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    elapsed = None if start_time is None else time.time() - start_time
+    eta = None
+    if elapsed is not None and total and current > 0:
+        eta = elapsed * max(int(total) - int(current), 0) / max(int(current), 1)
+    total_text = "?" if total is None else str(int(total))
+    parts = [
+        f"[{domain}] {stage}",
+        f"{unit}={int(current)}/{total_text}",
+    ]
+    if train_loss is not None:
+        parts.append(f"train_loss={_fmt_metric(train_loss)}")
+    if val_loss is not None:
+        parts.append(f"val_loss={_fmt_metric(val_loss)}")
+    if best_val_loss is not None:
+        parts.append(f"best_val_loss={_fmt_metric(best_val_loss)}")
+    if best_step is not None:
+        parts.append(f"best_step={int(best_step)}")
+    if patience_counter is not None and patience is not None:
+        parts.append(f"patience={int(patience_counter)}/{int(patience)}")
+    if lr is not None:
+        parts.append(f"lr={_fmt_metric(lr)}")
+    if elapsed is not None:
+        parts.append(f"elapsed={_fmt_seconds(elapsed)}")
+    if eta is not None:
+        parts.append(f"eta={_fmt_seconds(eta)}")
+    for key, value in (extra or {}).items():
+        parts.append(f"{key}={value}")
+    print(" | ".join(parts))
+
+
 @contextmanager
 def stage_logging(domain: str, stage: str, *, run_id: str | None = None):
     start = stage_start(domain, stage, run_id=run_id)

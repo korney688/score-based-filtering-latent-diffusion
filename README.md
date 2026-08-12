@@ -1,127 +1,98 @@
-# Score-Based Filtering for Image Denoising
+# Фильтрация по score для обучения денойзеров
 
-This repository studies score-based filtering for downstream image denoising under controlled per-image corruption.
+Проект исследует, можно ли улучшить обучение моделей подавления шума за счет отбора обучающих изображений по оценке, полученной из DDPM.
 
-## Current Pipeline
+Основная идея: сначала создается контролируемо зашумленный корпус изображений, затем на этом корпусе обучается DDPM в пространстве изображений. После отдельной проверки DDPM используется как модель оценки: для каждого изображения считается значение оценки, по которому формируются обучающие подвыборки. Затем на этих подвыборках обучаются модели подавления шума, и их качество сравнивается с обучением на полном корпусе.
+
+## Общий ход эксперимента
 
 ```text
 Clean dataset
--> controlled per-image corruption
--> image-space DDPM
--> DDPM score validation
--> selected checkpoint + timestep + MC K
--> full-corpus scoring
--> Filtering: Full / Top-K 10% / Quantile-spread 10% / Random 10%
--> downstream denoising
--> internal evaluation
--> external evaluation where applicable
--> summary
+    -> controlled per-image corruption
+    -> image-space DDPM
+    -> DDPM score validation
+    -> scoring full train corpus
+    -> filtering
+    -> downstream denoising
+    -> internal evaluation
+    -> external evaluation where applicable
 ```
 
-Current domains:
+Текущие наборы данных:
 
-- MNIST
-- CIFAR-10
-- ImageNet-100
+- MNIST;
+- CIFAR-10;
+- ImageNet-100.
 
-Encoder and latent-DDPM experiments are historical work and are preserved under `legacy/`.
+## Зашумление корпуса
 
-## Protocol
-
-Current filtering uses exactly one subset fraction:
+Для каждого изображения обучающего корпуса независимо выбирается целевой уровень качества:
 
 ```text
-Full            = 100% training pool
-Top-K           = 10%, minimum DDPM score, deterministic tie-break by original_index
-Quantile-spread = 10%, exact shared selector
-Random          = 10%, deterministic sample without replacement
+target_PSNR ~ Uniform(10, 40) dB
 ```
 
-Current score validation uses:
+Из него вычисляется уровень гауссовского шума:
 
 ```text
-PSNR ladder = [10, 15, 20, 25, 30, 35, 40] dB
-score       = ||epsilon_theta(x_t, t)||^2
-gate        = PASS required before filtering/downstream
+sigma = 10^(-target_PSNR / 20)
 ```
 
-Downstream denoisers use validation-based early stopping where supported by the current domain pipeline. Evaluation uses `best.pt`, selected by validation loss.
-
-## Quick Start
-
-```bash
-python scripts/run_mnist_pipeline.py --help
-python scripts/run_cifar10_pipeline.py --help
-python scripts/run_imagenet100_pipeline.py --help
-python scripts/run_external_evaluation.py --help
-```
-
-Canonical configs:
+После этого формируется фиксированное зашумленное изображение:
 
 ```text
-configs/experiments/mnist.yaml
-configs/experiments/cifar10.yaml
-configs/experiments/imagenet100.yaml
+x_corpus = clip(x_clean + sigma * noise, 0, 1)
 ```
 
-New runs write to:
+Это зашумление однозначно задается индексом изображения и начальным числом генератора. Один и тот же зашумленный корпус используется для DDPM, вычисления оценки, фильтрации и обучения моделей подавления шума.
+
+## Проверка оценки DDPM
+
+DDPM обучается напрямую в пространстве изображений. Модель получает зашумленные изображения как тензоры изображений, без кодировщика и без скрытого представления.
+
+Перед фильтрацией проводится отдельная проверка оценки. Проверяется, насколько оценка DDPM согласована с известным уровнем ухудшения изображения на шкале:
 
 ```text
-experiments/<domain>/<run_id>/
+PSNR = 10, 15, 20, 25, 30, 35, 40 dB
 ```
 
-## Smoke / Dry Run
+После проверки выбираются контрольная точка, шаг диффузии и число повторов Монте-Карло. Фильтрация запускается только после успешного прохождения проверки качества оценки.
 
-MNIST synthetic smoke:
+## Фильтрация
 
-```bash
-python scripts/run_mnist_pipeline.py --stage smoke_checks --smoke
-```
-
-CIFAR-10 dry-run:
-
-```bash
-python scripts/run_cifar10_pipeline.py --stage validation_all --smoke --dry-run
-```
-
-ImageNet-100 dry-run:
-
-```bash
-python scripts/run_imagenet100_pipeline.py \
-  --config configs/experiments/imagenet100.yaml \
-  --run-id imagenet100_smoke \
-  --experiment-root experiments/imagenet100/imagenet100_smoke \
-  --stage preflight \
-  --smoke \
-  --dry-run
-```
-
-## External Evaluation
-
-External benchmarks for CIFAR-10 and ImageNet-100 use:
+Сравниваются четыре варианта обучающего набора:
 
 ```text
-Kodak24 / CBSD68 / Urban100
-AWGN sigma = 25 / 255
-seed = 42
+Full               = 100%
+Top-K              = 10%
+Quantile-spread    = 10%
+Random             = 10%
 ```
 
-Run:
+Вариант с лучшими K изображениями выбирает элементы с наилучшей оценкой DDPM. Квантильная подвыборка выбирает 10% изображений, распределенных по диапазону значений оценки. Случайная подвыборка имеет тот же размер и используется как базовый вариант сравнения, независимый от оценки DDPM.
 
-```bash
-python scripts/run_external_evaluation.py --help
-```
+## Обучение моделей денойзинга
 
-## Repository Structure
+Модель подавления шума обучается удалять отдельный рабочий шум:
 
 ```text
-configs/experiments/      current domain configs
-scripts/                  canonical launchers and helper CLIs
-src/                      current implementation modules
-tests/                    lightweight current tests
-legacy/                   historical encoder/latent code and old launchers
+x_target = x_corpus
+x_input  = clip(x_corpus + task_noise, 0, 1)
 ```
 
-## Legacy
+Зашумление корпуса и рабочий шум являются разными уровнями шума. Это позволяет проверять, какие обучающие изображения лучше подходят для обучения модели подавления шума на уже зашумленном корпусе.
 
-Previous research investigated encoder-based latent DDPM variants, including noise-consistency autoencoders and induced latent noise. Those components are not part of the current image-space pipeline. They are retained under `legacy/` for provenance and reproducibility of earlier experiments.
+В экспериментах используются TDnCNN и DRUNet. Для обучения моделей подавления шума применяется ранняя остановка по проверочной выборке, а итоговая оценка выполняется по лучшей контрольной точке, выбранной по ошибке на этой выборке.
+
+## Аугументация
+
+Для DRUNet на CIFAR-10 дополнительно проверяется стандартное пространственное расширение обучающих данных:
+
+```text
+RandomCrop 32x32 with padding 4
+RandomHorizontalFlip p = 0.5
+```
+
+Пространственное преобразование применяется к `x_corpus` перед добавлением рабочего шума. Полученный преобразованный тензор одновременно является целевым изображением, а зашумленный вход строится уже после этого преобразования. Это сохраняет пространственное соответствие между входом и целевым изображением.
+
+Цель этой проверки — понять, улучшает ли пространственное расширение данных обобщение DRUNet при обучении на малых отфильтрованных подвыборках.

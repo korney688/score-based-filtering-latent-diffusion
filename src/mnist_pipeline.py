@@ -26,12 +26,12 @@ except Exception:  # pragma: no cover - optional dependency
     skimage_ssim = None
 
 from src.ddpm.image_space import ImageSpaceDDPM, build_image_space_ddpm_model
-from src.evaluation.image_lab_replication_analysis import (
+from src.filtering.selection import (
     select_quantile_spread_exact,
     select_random_exact,
     select_topk_exact,
 )
-from src.image_lab_replication_datasets import (
+from src.corruption_datasets import (
     CorpusTaskNoiseDataset,
     EvalNoiseDataset,
     MaterializedCorpusDataset,
@@ -41,8 +41,10 @@ from src.image_lab_replication_datasets import (
 )
 from src.utils.current_protocol import (
     print_protocol_summary,
+    should_log_progress,
     stage_logging,
     stage_skip,
+    training_progress,
     validate_current_protocol,
 )
 
@@ -365,6 +367,8 @@ def stage_ddpm_train(ctx: Context) -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     global_step = 0
+    log_start = time.time()
+    log_interval = int(deep_get(ctx.cfg, "ddpm.log_interval_epochs", 1))
     for epoch in range(1, epochs + 1):
         losses: list[float] = []
         model.train()
@@ -392,9 +396,21 @@ def stage_ddpm_train(ctx: Context) -> None:
                 },
                 checkpoint_path(ctx, epoch),
             )
+        pd.DataFrame(rows).to_csv(ctx.experiment_root / "02_ddpm" / "training_history.csv", index=False)
+        if should_log_progress(epoch, epochs, log_interval):
+            training_progress(
+                "MNIST",
+                "ddpm_train",
+                unit="epoch",
+                current=epoch,
+                total=epochs,
+                train_loss=rows[-1]["loss"],
+                lr=opt.param_groups[0]["lr"],
+                start_time=log_start,
+                extra={"global_step": global_step},
+            )
         if max_steps is not None and global_step >= max_steps:
             break
-    pd.DataFrame(rows).to_csv(ctx.experiment_root / "02_ddpm" / "training_history.csv", index=False)
     mark_done(ctx, "ddpm_train", [ctx.experiment_root / "02_ddpm" / "training_history.csv"])
 
 
@@ -915,6 +931,7 @@ def stage_tdncnn_train(ctx: Context, stage: str) -> None:
     stop_reason = "max_steps"
     out = ctx.experiment_root / "06_downstream" / "tdncnn" / variant
     out.mkdir(parents=True, exist_ok=True)
+    log_start = time.time()
     while step < max_steps:
         for x_in, x_target in loader:
             model.train()
@@ -952,6 +969,23 @@ def stage_tdncnn_train(ctx: Context, stage: str) -> None:
                     if checks_without_improvement >= patience:
                         stop_reason = "early_stopping"
             rows.append(row)
+            if should_log_progress(step, max_steps, val_interval) or np.isfinite(row["val_loss"]):
+                training_progress(
+                    "MNIST",
+                    f"tdncnn_{variant}",
+                    unit="step",
+                    current=step,
+                    total=max_steps,
+                    train_loss=value,
+                    val_loss=row["val_loss"],
+                    best_val_loss=best,
+                    best_step=best_step,
+                    patience_counter=checks_without_improvement,
+                    patience=patience,
+                    lr=opt.param_groups[0]["lr"],
+                    start_time=log_start,
+                )
+                pd.DataFrame(rows).to_csv(out / "training_history.csv", index=False)
             if step >= max_steps:
                 break
             if stop_reason == "early_stopping":

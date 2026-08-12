@@ -30,6 +30,7 @@ data/
 # Training outputs and artifacts
 checkpoints/
 experiments/
+artifacts/
 !configs/experiments/
 !configs/experiments/**
 outputs/
@@ -76,5 +77,9 @@ mlruns/
 # experiment/tmp/output roots stay ignored through their parent folders.
 
 # Local archival folders
+legacy/
 archive_legacy/
 archive_unused/
+
+# Local validation scripts kept out of the public repository
+tests/

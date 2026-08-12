@@ -13,6 +13,11 @@ dataset:
 runtime:
   num_workers: 4
 
+provenance:
+  # Allows downstream-only ablations to reuse already validated score/filtering
+  # artifacts when the downstream config changes but DDPM/corpus/filtering do not.
+  allow_downstream_reuse_with_mismatched_config_hash: true
+
 seeds:
   dataset_seed: 20260809
   corpus_seed: 42

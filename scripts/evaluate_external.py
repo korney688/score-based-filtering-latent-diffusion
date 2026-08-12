@@ -656,7 +656,7 @@ def main() -> None:
             seed=args.seed,
             qualitative_count=1 if args.dry_run else args.qualitative_count,
             lpips_model=lpips_model,
-            max_images=1 if args.dry_run else None,
+            max_images=1 if args.dry_run else args.max_images,
             dry_run=args.dry_run,
         )
         summaries.append(summary)

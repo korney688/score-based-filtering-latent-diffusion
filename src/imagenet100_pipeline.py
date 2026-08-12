@@ -32,11 +32,13 @@ from src.DRUNet_image import build_drunet
 from src.TDnCNN_image import DnCNN_2D, align_lpips_scaling_layer, prepare_for_lpips
 from src.Unet_model import UNet
 from src.dataset_registry import load_dataset_config
-from src.evaluation.image_lab_replication_analysis import select_quantile_spread_exact
-from src.image_lab_replication_datasets import stable_int_seed
+from src.filtering.selection import select_quantile_spread_exact
+from src.corruption_datasets import stable_int_seed
 from src.utils.current_protocol import (
     print_protocol_summary,
+    should_log_progress,
     stage_logging,
+    training_progress,
     validate_current_protocol,
 )
 
@@ -1114,6 +1116,8 @@ def stage_ddpm_train(ctx: PipelineContext) -> None:
     global_step = 0
     max_optimizer_steps = int(ctx.cfg["real_smoke"]["ddpm_optimizer_steps"]) if ctx.real_smoke else None
     stop_training = False
+    log_start = time.time()
+    log_interval = int(ctx.cfg.get("ddpm", {}).get("log_interval_epochs", 1))
     for epoch in range(1, final_epoch + 1):
         model.train()
         losses = []
@@ -1145,6 +1149,18 @@ def stage_ddpm_train(ctx: PipelineContext) -> None:
         }
         torch.save(checkpoint, ckpt_dir / f"epoch_{epoch:03d}.pt")
         pd.DataFrame(rows).to_csv(ctx.stage_root(stage) / "training_history.csv", index=False)
+        if should_log_progress(epoch, final_epoch, log_interval):
+            training_progress(
+                "ImageNet-100",
+                "ddpm_train",
+                unit="epoch",
+                current=epoch,
+                total=final_epoch,
+                train_loss=row["train_loss"],
+                lr=optimizer.param_groups[0]["lr"],
+                start_time=log_start,
+                extra={"global_step": global_step, "checkpoint": f"epoch_{epoch:03d}.pt"},
+            )
         if stop_training:
             break
     reload_payload = torch.load(last_ckpt, map_location=device)
@@ -1866,7 +1882,15 @@ def require_selected(ctx: PipelineContext) -> dict[str, Any]:
         raise RuntimeError("Filtering/downstream blocked: missing successful score_select marker or selected_score_config.yaml")
     cfg = read_yaml(selected)
     if cfg.get("config_hash") != ctx.cfg_hash:
-        raise RuntimeError("selected_score_config config_hash does not match current run")
+        provenance_cfg = ctx.cfg.get("provenance", {})
+        if not isinstance(provenance_cfg, dict):
+            provenance_cfg = {}
+        if not bool(provenance_cfg.get("allow_downstream_reuse_with_mismatched_config_hash", False)):
+            raise RuntimeError("selected_score_config config_hash does not match current run")
+        print(
+            "[provenance] selected_score_config config_hash differs from current run; "
+            "continuing because downstream-only artifact reuse is explicitly enabled."
+        )
     return cfg
 
 
@@ -2028,7 +2052,7 @@ def write_filtering_subsets(ctx: PipelineContext, scores: pd.DataFrame) -> None:
             "n_full": n_full,
             "n_subset": n_subset,
             "topk_rule": "minimum score, original_index tie-breaker",
-            "quantile_spread_reference": "src.evaluation.image_lab_replication_analysis.select_quantile_spread_exact",
+            "quantile_spread_reference": "src.filtering.selection.select_quantile_spread_exact",
             "random_seed": int(ctx.cfg["seeds"]["subset_seed"]),
             "full_train_topk_requires_all_classes": bool(ctx.cfg["filtering"].get("full_train_topk_requires_all_classes", True)),
             "topk_class_coverage": topk_cov,
@@ -2369,6 +2393,21 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
                 steps_per_sec=round(float(step) / max(elapsed, EPS), 4),
                 cuda_allocated_mb=float(torch.cuda.memory_allocated(device) / 1024**2) if device.type == "cuda" else 0.0,
                 cuda_reserved_mb=float(torch.cuda.memory_reserved(device) / 1024**2) if device.type == "cuda" else 0.0,
+            )
+            training_progress(
+                "ImageNet-100",
+                f"{model_name}_{variant}",
+                unit="step",
+                current=step,
+                total=max_steps,
+                train_loss=loss_value,
+                val_loss=val_loss,
+                best_val_loss=best_val_loss,
+                best_step=best_step,
+                patience_counter=checks_without_improvement,
+                patience=patience,
+                lr=optimizer.param_groups[0]["lr"],
+                start_time=start,
             )
         if stop_reason == "early_stopping":
             break
