@@ -7,7 +7,7 @@ dataset:
   channels: 3
   image_size: 64
   num_classes: 100
-  expected_train_samples: 130000
+  expected_train_samples: 128982
   expected_val_samples: 5000
 
 runtime:
@@ -141,6 +141,39 @@ drunet:
   weight_decay: 0.0
   validation_interval_steps: 500
   validation_interval_steps_smoke: 1
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    mode: min
+    patience: 10
+    patience_smoke: 2
+    min_delta: 0.0001
+    warmup_steps: 1000
+    warmup_steps_smoke: 0
+
+restormer:
+  model: Restormer
+
+  dim: 48
+  num_blocks: [4, 6, 6, 8]
+  num_refinement_blocks: 4
+  heads: [1, 2, 4, 8]
+  ffn_expansion_factor: 2.66
+  bias: false
+  layer_norm_type: WithBias
+
+  batch_size: 4
+  batch_size_smoke: 2
+
+  max_steps: 30480
+  max_steps_smoke: 1
+
+  lr: 0.0001
+  weight_decay: 0.0
+
+  validation_interval_steps: 500
+  validation_interval_steps_smoke: 1
+
   early_stopping:
     enabled: true
     monitor: val_loss

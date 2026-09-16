@@ -112,6 +112,28 @@ downstream:
       patience: 10
       min_delta: 0.0001
       warmup_steps: 1000
+
+  restormer:
+    batch_size: 16
+    max_optimizer_steps: null
+    lr: 0.0001
+    weight_decay: 0.0
+
+    dim: 48
+    num_blocks: [ 4, 6, 6, 8 ]
+    num_refinement_blocks: 4
+    heads: [ 1, 2, 4, 8 ]
+    ffn_expansion_factor: 2.66
+    bias: false
+    layer_norm_type: WithBias
+    validation_interval_steps: 500
+    early_stopping:
+      enabled: true
+      monitor: val_loss
+      mode: min
+      patience: 10
+      min_delta: 0.0001
+      warmup_steps: 1000
   task_noise:
     kind: awgn_uniform_sigma
     sigma_min: 0.1

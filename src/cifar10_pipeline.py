@@ -20,6 +20,7 @@ from torchvision import datasets, transforms
 import yaml
 
 from src.DRUNet_image import build_drunet
+from src.Restormer_image import build_restormer
 from src.TDnCNN_image import align_lpips_scaling_layer, prepare_for_lpips
 from src.corruption_datasets import EvalNoiseDataset, MaterializedCorpusDataset, stable_int_seed
 from src.utils.current_protocol import (
@@ -2035,6 +2036,11 @@ STAGES = [
     "drunet_quantile",
     "drunet_random",
     "drunet_evaluate",
+    "restormer_full",
+    "restormer_topk",
+    "restormer_quantile",
+    "restormer_random",
+    "restormer_evaluate",
     "tdncnn_topk_aug",
     "tdncnn_topk_aug_lr05",
     "drunet_topk_aug",
@@ -2068,6 +2074,12 @@ DRUNET_SUBSETS = {
     "drunet_topk": "topk_10",
     "drunet_quantile": "quantile_spread_10",
     "drunet_random": "random_10",
+}
+RESTORMER_SUBSETS = {
+    "restormer_full": "full_45000",
+    "restormer_topk": "topk_10",
+    "restormer_quantile": "quantile_spread_10",
+    "restormer_random": "random_10",
 }
 
 TOPK_ABLATION_STAGES = {
@@ -2126,7 +2138,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--experiment-root", type=Path, default=None)
     parser.add_argument("--data-root", type=Path, default=None)
-    parser.add_argument("--stage", choices=[*STAGES, "all", "validation_all", "tdncnn_all", "drunet_all", "topk_ablation_all"], default="all")
+    parser.add_argument("--stage", choices=[*STAGES, "all", "validation_all", "tdncnn_all", "drunet_all", "restormer_all", "topk_ablation_all"], default="all")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke", action="store_true")
@@ -2153,6 +2165,8 @@ def expanded_stages(stage: str) -> list[str]:
         return ["tdncnn_full", "tdncnn_topk", "tdncnn_quantile", "tdncnn_random", "tdncnn_evaluate"]
     if stage == "drunet_all":
         return ["drunet_full", "drunet_topk", "drunet_quantile", "drunet_random", "drunet_evaluate"]
+    if stage == "restormer_all":
+        return ["restormer_full", "restormer_topk", "restormer_quantile", "restormer_random", "restormer_evaluate"]
     if stage == "topk_ablation_all":
         return ["tdncnn_topk_aug", "tdncnn_topk_aug_lr05", "drunet_topk_aug", "drunet_topk_aug_lr05", "topk_ablation_evaluate"]
     if stage == "all":
@@ -2390,6 +2404,100 @@ def drunet_initial_state(root: Path, cfg: dict[str, Any], *, smoke: bool) -> Pat
     return path
 
 
+def restormer_stage_root(root: Path, subset: str) -> Path:
+    return (
+        root
+        / "06_downstream"
+        / "restormer"
+        / subset.replace("full_45000", "full")
+        .replace("quantile_spread_10", "quantile")
+        .replace("random_10", "random")
+    )
+def build_current_restormer(
+    cfg: dict[str, Any],
+    *,
+    smoke: bool,
+) -> nn.Module:
+    model_cfg = cfg.get("downstream", {}).get("restormer", {})
+
+    if smoke:
+        dim = int(deep_get(cfg, "smoke.restormer_dim", 16))
+        num_blocks = deep_get(
+            cfg,
+            "smoke.restormer_num_blocks",
+            [1, 1, 1, 1],
+        )
+        num_refinement_blocks = int(
+            deep_get(cfg, "smoke.restormer_num_refinement_blocks", 1)
+        )
+        heads = deep_get(
+            cfg,
+            "smoke.restormer_heads",
+            [1, 2, 4, 8],
+        )
+    else:
+        dim = int(model_cfg.get("dim", 48))
+        num_blocks = model_cfg.get(
+            "num_blocks",
+            [4, 6, 6, 8],
+        )
+        num_refinement_blocks = int(
+            model_cfg.get("num_refinement_blocks", 4)
+        )
+        heads = model_cfg.get(
+            "heads",
+            [1, 2, 4, 8],
+        )
+
+    return build_restormer(
+        in_channels=3,
+        out_channels=3,
+        dim=dim,
+        num_blocks=num_blocks,
+        num_refinement_blocks=num_refinement_blocks,
+        heads=heads,
+        ffn_expansion_factor=float(
+            model_cfg.get("ffn_expansion_factor", 2.66)
+        ),
+        bias=bool(model_cfg.get("bias", False)),
+        layer_norm_type=str(
+            model_cfg.get("layer_norm_type", "WithBias")
+        ),
+    )
+def restormer_initial_state(
+    root: Path,
+    cfg: dict[str, Any],
+    *,
+    smoke: bool,
+) -> Path:
+    path = (
+        root
+        / "06_downstream"
+        / "restormer"
+        / "initial_state.pt"
+    )
+
+    if path.exists():
+        return path
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    torch.manual_seed(
+        int(deep_get(cfg, "seeds.model_seed", 42))
+    )
+
+    model = build_current_restormer(
+        cfg,
+        smoke=smoke,
+    )
+
+    torch.save(
+        model.state_dict(),
+        path,
+    )
+
+    return path
+
 def drunet_train_dataset(root: Path, cfg: dict[str, Any], subset: str, *, validation: bool = False) -> CorpusTaskNoiseWithSigmaDataset:
     return drunet_train_dataset_with_options(root, cfg, subset, validation=validation, augment=False, task_noise_version_suffix="")
 
@@ -2429,7 +2537,64 @@ def drunet_train_dataset_with_options(
         augmentation_seed=42,
         augment=bool(augment and not validation),
     )
+def restormer_train_dataset(
+    root: Path,
+    cfg: dict[str, Any],
+    subset: str,
+    *,
+    validation: bool = False,
+) -> CorpusTaskNoiseWithSigmaDataset:
+    return drunet_train_dataset(
+        root,
+        cfg,
+        subset,
+        validation=validation,
+    )
 
+@torch.no_grad()
+
+def restormer_validation_loss(
+    root: Path,
+    cfg: dict[str, Any],
+    model: nn.Module,
+    device: torch.device,
+    *,
+    batch_size: int,
+) -> float:
+    loader = DataLoader(
+        restormer_train_dataset(
+            root,
+            cfg,
+            "full_45000",
+            validation=True,
+        ),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+    )
+
+    criterion = nn.MSELoss(reduction="sum")
+
+    model.eval()
+
+    total = 0.0
+    count = 0
+
+    for x_input, x_target, _sigma, _ in loader:
+        x_input = x_input.to(device)
+        x_target = x_target.to(device)
+
+        pred = model(x_input)
+
+        total += float(
+            criterion(pred, x_target).item()
+        )
+
+        count += int(np.prod(x_target.shape))
+
+    model.train()
+
+    return total / max(count, 1)
 
 @torch.no_grad()
 def drunet_validation_loss(root: Path, cfg: dict[str, Any], model: nn.Module, device: torch.device, *, batch_size: int) -> float:
@@ -2575,6 +2740,379 @@ def run_drunet_train(cfg: dict[str, Any], args: argparse.Namespace, root: Path, 
     (out_dir / "run_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     (out_dir / "status.json").write_text(json.dumps({"status": "complete", **meta}, indent=2), encoding="utf-8")
 
+def run_restormer_train(
+    cfg: dict[str, Any],
+    args: argparse.Namespace,
+    root: Path,
+    subset: str,
+) -> None:
+    pass_marker = root / "06_confirmation" / "PASS.marker"
+
+    if not pass_marker.exists():
+        raise RuntimeError(
+            f"Restormer downstream is blocked until PASS marker exists: {pass_marker}"
+        )
+
+    stage_cfg = cfg["downstream"]["restormer"]
+
+    out_dir = restormer_stage_root(root, subset)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    best_path = out_dir / "best.pt"
+    status_path = out_dir / "status.json"
+
+    if args.resume and status_path.exists() and best_path.exists():
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+
+        if status.get("status") == "complete":
+            print(
+                f"[SKIP] Restormer {subset} | completed best.pt found"
+            )
+            return
+
+    device = resolve_device(args.device, args.smoke)
+
+    batch_size = int(
+        deep_get(cfg, "smoke.downstream_batch_size", 4)
+        if args.smoke
+        else stage_cfg.get("batch_size", 16)
+    )
+
+    max_steps = (
+        deep_get(
+            cfg,
+            "smoke.downstream_max_optimizer_steps",
+            None,
+        )
+        if args.smoke
+        else stage_cfg.get("max_optimizer_steps")
+    )
+
+    if max_steps is None:
+        full_indices = np.load(
+            root
+            / "08_downstream_commands"
+            / "full_45000_indices.npy"
+        )
+
+        max_steps = int(
+            math.ceil(len(full_indices) / batch_size) * 5
+        )
+
+    model = build_current_restormer(
+        cfg,
+        smoke=args.smoke,
+    ).to(device)
+
+    initial = restormer_initial_state(
+        root,
+        cfg,
+        smoke=args.smoke,
+    )
+
+    model.load_state_dict(
+        torch.load(initial, map_location=device),
+        strict=True,
+    )
+
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=float(stage_cfg.get("lr", 1e-4)),
+        weight_decay=float(
+            stage_cfg.get("weight_decay", 0.0)
+        ),
+    )
+
+    loader = DataLoader(
+        restormer_train_dataset(
+            root,
+            cfg,
+            subset,
+        ),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=int(
+            deep_get(cfg, "runtime.num_workers", 0)
+        ),
+        generator=torch.Generator().manual_seed(
+            int(deep_get(cfg, "seeds.model_seed", 42))
+        ),
+    )
+
+    iterator = cycle_loader(loader)
+
+    criterion = nn.MSELoss()
+
+    early = stage_cfg["early_stopping"]
+
+    val_interval = max(
+        1,
+        int(
+            deep_get(
+                cfg,
+                "smoke.downstream_validation_interval_steps",
+                1,
+            )
+            if args.smoke
+            else stage_cfg.get(
+                "validation_interval_steps",
+                500,
+            )
+        ),
+    )
+
+    patience = max(
+        1,
+        int(
+            deep_get(
+                cfg,
+                "smoke.downstream_early_stopping_patience",
+                2,
+            )
+            if args.smoke
+            else early.get("patience", 10)
+        ),
+    )
+
+    min_delta = max(
+        0.0,
+        float(
+            early.get(
+                "min_delta",
+                1e-4,
+            )
+        ),
+    )
+
+    warmup_steps = max(
+        0,
+        int(
+            deep_get(
+                cfg,
+                "smoke.downstream_early_stopping_warmup_steps",
+                0,
+            )
+            if args.smoke
+            else early.get(
+                "warmup_steps",
+                1000,
+            )
+        ),
+    )
+
+    best_val_loss = float("inf")
+    best_step = 0
+    checks_without_improvement = 0
+    stop_reason = "max_steps"
+
+    rows: list[dict[str, Any]] = []
+
+    start = time.perf_counter()
+    log_start = time.time()
+
+    for step in range(1, int(max_steps) + 1):
+        x_input, x_target, _sigma, _ = next(iterator)
+
+        x_input = x_input.to(device)
+        x_target = x_target.to(device)
+
+        pred = model(x_input)
+
+        loss = criterion(
+            pred,
+            x_target,
+        )
+
+        optimizer.zero_grad(set_to_none=True)
+
+        loss.backward()
+
+        optimizer.step()
+
+        train_loss = float(
+            loss.detach().cpu().item()
+        )
+
+        val_loss = float("nan")
+
+        if (
+            step == 1
+            or step == int(max_steps)
+            or step % val_interval == 0
+        ):
+            val_loss = restormer_validation_loss(
+                root,
+                cfg,
+                model,
+                device,
+                batch_size=batch_size,
+            )
+
+            if (
+                step >= warmup_steps
+                and val_loss < best_val_loss - min_delta
+            ):
+                best_val_loss = val_loss
+                best_step = int(step)
+                checks_without_improvement = 0
+
+                torch.save(
+                    model.state_dict(),
+                    best_path,
+                )
+
+            elif step >= warmup_steps:
+                checks_without_improvement += 1
+
+                if checks_without_improvement >= patience:
+                    stop_reason = "early_stopping"
+
+        rows.append(
+            {
+                "step": step,
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+                "best_val_loss": best_val_loss,
+                "best_step": best_step,
+                "patience_counter": checks_without_improvement,
+            }
+        )
+
+        if (
+            should_log_progress(
+                step,
+                int(max_steps),
+                val_interval,
+            )
+            or np.isfinite(val_loss)
+        ):
+            training_progress(
+                "CIFAR-10",
+                f"restormer_{subset}",
+                unit="step",
+                current=step,
+                total=int(max_steps),
+                train_loss=train_loss,
+                val_loss=val_loss,
+                best_val_loss=best_val_loss,
+                best_step=best_step,
+                patience_counter=checks_without_improvement,
+                patience=patience,
+                lr=optimizer.param_groups[0]["lr"],
+                start_time=log_start,
+            )
+
+            pd.DataFrame(rows).to_csv(
+                out_dir / "training_history.csv",
+                index=False,
+            )
+
+        if stop_reason == "early_stopping":
+            break
+
+    if not best_path.exists():
+        torch.save(
+            model.state_dict(),
+            best_path,
+        )
+
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "step": int(step),
+        },
+        out_dir / "last.pt",
+    )
+
+    pd.DataFrame(rows).to_csv(
+        out_dir / "training_history.csv",
+        index=False,
+    )
+
+    subset_path = (
+        root
+        / "08_downstream_commands"
+        / f"{subset}_indices.npy"
+    )
+
+    subset_indices = np.load(subset_path)
+
+    selected_config_path = (
+        root
+        / "05_selected_configuration"
+        / "selected_score_config.yaml"
+    )
+
+    corpus_manifest_path = (
+        root
+        / "01_corpus"
+        / "train_manifest.csv"
+    )
+
+    meta = {
+        "model": "restormer",
+        "subset": subset,
+        "variant": SUBSET_LABELS[subset],
+        "subset_size": int(len(subset_indices)),
+        "optimizer_steps": int(step),
+        "batch_size": int(batch_size),
+
+        "initial_state": str(initial),
+        "initial_state_sha256": sha256_file(initial),
+
+        "subset_indices": str(subset_path),
+        "subset_indices_sha256": sha256_file(subset_path),
+
+        "corpus_manifest": str(corpus_manifest_path),
+        "corpus_manifest_sha256": sha256_file(
+            corpus_manifest_path
+        ),
+
+        "selected_score_config": str(
+            selected_config_path
+        ),
+        "selected_score_config_sha256": sha256_file(
+            selected_config_path
+        ),
+
+        "early_stopping_enabled": True,
+        "early_stopping_monitor": "val_loss",
+        "early_stopping_mode": "min",
+        "early_stopping_patience": int(patience),
+        "early_stopping_min_delta": float(min_delta),
+        "early_stopping_warmup_steps": int(warmup_steps),
+        "validation_interval_steps": int(val_interval),
+
+        "best_step": int(best_step),
+        "best_val_loss": float(best_val_loss),
+        "stop_reason": stop_reason,
+
+        "wall_clock_train_seconds": (
+            time.perf_counter() - start
+        ),
+
+        "best_checkpoint": str(best_path),
+        "last_checkpoint": str(
+            out_dir / "last.pt"
+        ),
+    }
+
+    (out_dir / "run_meta.json").write_text(
+        json.dumps(meta, indent=2),
+        encoding="utf-8",
+    )
+
+    (out_dir / "status.json").write_text(
+        json.dumps(
+            {
+                "status": "complete",
+                **meta,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 def train_drunet_topk_ablation(cfg: dict[str, Any], args: argparse.Namespace, root: Path, *, variant: str, lr_multiplier: float) -> None:
     pass_marker = root / "06_confirmation" / "PASS.marker"
@@ -2765,6 +3303,166 @@ def run_drunet_evaluate(cfg: dict[str, Any], args: argparse.Namespace, root: Pat
     summary.to_csv(eval_dir / "summary_table.csv", index=False)
     (eval_dir / "summary_table.md").write_text(summary.to_csv(index=False) + "\n", encoding="utf-8")
 
+@torch.no_grad()
+def run_restormer_evaluate(
+    cfg: dict[str, Any],
+    args: argparse.Namespace,
+    root: Path,
+) -> None:
+    device = resolve_device(args.device, args.smoke)
+
+    eval_dir = root / "07_evaluation" / "restormer"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset = EvalNoiseWithSigmaDataset(
+        root
+        / "08_downstream_commands"
+        / "eval_noise_cache"
+        / "test_eval_input.pt",
+        root
+        / "08_downstream_commands"
+        / "eval_noise_cache"
+        / "test_eval_target.pt",
+        root
+        / "08_downstream_commands"
+        / "eval_noise_cache"
+        / "test_noise_manifest.csv",
+    )
+
+    loader = DataLoader(
+        dataset,
+        batch_size=int(
+            deep_get(cfg, "evaluation.batch_size", 128)
+        ),
+        shuffle=False,
+        num_workers=0,
+    )
+
+    lpips_model = create_lpips_model(
+        device,
+        enabled=bool(
+            deep_get(cfg, "evaluation.lpips_enabled", True)
+        ),
+    )
+
+    rows: list[dict[str, Any]] = []
+
+    for subset in [
+        "full_45000",
+        "topk_10",
+        "quantile_spread_10",
+        "random_10",
+    ]:
+        model = build_current_restormer(
+            cfg,
+            smoke=args.smoke,
+        ).to(device)
+
+        checkpoint = (
+            restormer_stage_root(root, subset)
+            / "best.pt"
+        )
+
+        model.load_state_dict(
+            torch.load(
+                checkpoint,
+                map_location=device,
+            ),
+            strict=True,
+        )
+
+        model.eval()
+
+        offset = 0
+
+        for x_input, x_target, _sigma, original_index in loader:
+            x_input = x_input.to(device)
+            x_target = x_target.to(device)
+
+            pred = model(x_input)
+
+            mse, psnr, ssim, lpips_values = batch_metrics(
+                pred,
+                x_target,
+                lpips_model,
+            )
+
+            for i in range(int(x_input.shape[0])):
+                rows.append(
+                    {
+                        "Architecture": "Restormer",
+                        "Variant": SUBSET_LABELS[subset],
+                        "sample_index": int(offset + i),
+                        "original_index": int(
+                            original_index[i].item()
+                        ),
+                        "MSE": float(mse[i]),
+                        "PSNR": float(psnr[i]),
+                        "SSIM": float(ssim[i]),
+                        "LPIPS": float(lpips_values[i]),
+                    }
+                )
+
+            offset += int(x_input.shape[0])
+
+    per = pd.DataFrame(rows)
+
+    per.to_csv(
+        eval_dir / "per_image_metrics.csv",
+        index=False,
+    )
+
+    summary_rows = []
+
+    for variant, group in per.groupby(
+        "Variant",
+        sort=False,
+    ):
+        row: dict[str, Any] = {
+            "Architecture": "Restormer",
+            "Variant": variant,
+            "Images": int(len(group)),
+        }
+
+        for metric in [
+            "PSNR",
+            "SSIM",
+            "LPIPS",
+            "MSE",
+        ]:
+            values = pd.to_numeric(
+                group[metric],
+                errors="coerce",
+            )
+
+            row[metric] = (
+                float(values.mean())
+                if values.notna().any()
+                else np.nan
+            )
+
+        summary_rows.append(row)
+
+    summary = pd.DataFrame(summary_rows)
+
+    if not summary.empty:
+        full_rows = summary[
+            summary["Variant"] == "Full"
+        ]
+
+        if not full_rows.empty:
+            full_psnr = float(
+                full_rows.iloc[0]["PSNR"]
+            )
+
+            summary["Delta_PSNR_vs_Full"] = (
+                summary["PSNR"] - full_psnr
+            )
+
+    summary.to_csv(
+        eval_dir / "summary_table.csv",
+        index=False,
+    )
 
 @torch.no_grad()
 def run_topk_ablation_evaluate(cfg: dict[str, Any], args: argparse.Namespace, root: Path) -> None:
@@ -2959,6 +3657,11 @@ def run_stage(cfg: dict[str, Any], args: argparse.Namespace, root: Path, stage: 
     elif stage == "drunet_evaluate":
         run_drunet_evaluate(cfg, args, root)
         print(f"drunet_evaluate: wrote {root / '07_evaluation' / 'drunet' / 'summary_table.csv'}")
+    elif stage in RESTORMER_SUBSETS:
+        run_restormer_train(cfg,args,root,RESTORMER_SUBSETS[stage],)
+    elif stage == "restormer_evaluate":
+        run_restormer_evaluate(cfg,args,root,)
+        print("restormer_evaluate: wrote "f"{root / '07_evaluation' / 'restormer' / 'summary_table.csv'}")
     elif stage in TOPK_ABLATION_STAGES:
         model_name, variant, lr_multiplier = TOPK_ABLATION_STAGES[stage]
         if model_name == "tdncnn":
@@ -2983,7 +3686,7 @@ def main() -> None:
     args = parse_args()
     cfg = read_yaml(args.config)
     root = resolve_experiment_root(cfg, args)
-    validate_current_protocol("CIFAR-10", cfg, downstream_models=["tdncnn", "drunet"])
+    validate_current_protocol("CIFAR-10", cfg, downstream_models=["tdncnn", "drunet","restormer"])
     print(
         json.dumps(
             {
@@ -3001,7 +3704,7 @@ def main() -> None:
         cfg,
         run_id=args.run_id or str(deep_get(cfg, "experiment.run_id", "cifar10_001")),
         device=args.device or "auto",
-        downstream_models=["tdncnn", "drunet"],
+        downstream_models=["tdncnn", "drunet", "restormer"],
     )
     for stage in expanded_stages(args.stage):
         with stage_logging("CIFAR-10", stage, run_id=args.run_id or str(deep_get(cfg, "experiment.run_id", "cifar10_001"))):
