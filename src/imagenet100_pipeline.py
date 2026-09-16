@@ -42,6 +42,10 @@ from src.utils.current_protocol import (
     validate_current_protocol,
 )
 
+from src.DRUNet_image import build_drunet
+from src.Restormer_image import build_restormer
+from src.TDnCNN_image import DnCNN_2D, align_lpips_scaling_layer, prepare_for_lpips
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EPS = 1e-12
@@ -65,6 +69,13 @@ STAGE_DIRS = {
     "drunet_evaluate": "07_evaluation/drunet",
     "drunet_external_eval": "08_external_benchmarks/drunet",
     # Backward-compatible aliases for the original TDnCNN-only stage names.
+    "restormer_full": "06_downstream/restormer/full",
+    "restormer_topk": "06_downstream/restormer/topk_10",
+    "restormer_quantile": "06_downstream/restormer/quantile_10",
+    "restormer_random": "06_downstream/restormer/random_10",
+    "restormer_evaluate": "07_evaluation/restormer",
+
+
     "downstream_full": "06_downstream/tdncnn/full",
     "downstream_topk": "06_downstream/tdncnn/topk_10",
     "downstream_quantile": "06_downstream/tdncnn/quantile_10",
@@ -2144,16 +2155,22 @@ VARIANT_STAGE_ALIASES = {
     "downstream_topk": ("tdncnn", "topk_10"),
     "downstream_quantile": ("tdncnn", "quantile_10"),
     "downstream_random": ("tdncnn", "random_10"),
+
     "tdncnn_full": ("tdncnn", "full"),
     "tdncnn_topk": ("tdncnn", "topk_10"),
     "tdncnn_quantile": ("tdncnn", "quantile_10"),
     "tdncnn_random": ("tdncnn", "random_10"),
+
     "drunet_full": ("drunet", "full"),
     "drunet_topk": ("drunet", "topk_10"),
     "drunet_quantile": ("drunet", "quantile_10"),
     "drunet_random": ("drunet", "random_10"),
-}
 
+    "restormer_full": ("restormer", "full"),
+    "restormer_topk": ("restormer", "topk_10"),
+    "restormer_quantile": ("restormer", "quantile_10"),
+    "restormer_random": ("restormer", "random_10"),
+}
 
 def downstream_variant_name(stage: str) -> str:
     if stage in VARIANT_STAGE_ALIASES:
@@ -2173,11 +2190,12 @@ def downstream_model_name(stage: str) -> str:
 
 
 def downstream_model_cfg(ctx: PipelineContext, model_name: str) -> dict[str, Any]:
-    if model_name == "drunet":
-        merged = dict(ctx.cfg["downstream"])
-        merged.update(dict(ctx.cfg.get("drunet", {})))
-        return merged
-    return dict(ctx.cfg["downstream"])
+    merged = dict(ctx.cfg["downstream"])
+
+    if model_name in {"drunet", "restormer"}:
+        merged.update(dict(ctx.cfg.get(model_name, {})))
+
+    return merged
 
 
 def build_downstream_model(ctx: PipelineContext, model_name: str, device: torch.device) -> nn.Module:
@@ -2200,6 +2218,22 @@ def build_downstream_model(ctx: PipelineContext, model_name: str, device: torch.
             downsample_mode=str(cfg.get("downsample_mode", "strideconv")),
             upsample_mode=str(cfg.get("upsample_mode", "convtranspose")),
         )
+        return model.to(device)
+    if model_name == "restormer":
+        cfg = downstream_model_cfg(ctx, model_name)
+
+        model = build_restormer(
+            in_channels=channels,
+            out_channels=channels,
+            dim=int(cfg.get("dim", 48)),
+            num_blocks=cfg.get("num_blocks", [4, 6, 6, 8]),
+            num_refinement_blocks=int(cfg.get("num_refinement_blocks", 4)),
+            heads=cfg.get("heads", [1, 2, 4, 8]),
+            ffn_expansion_factor=float(cfg.get("ffn_expansion_factor", 2.66)),
+            bias=bool(cfg.get("bias", False)),
+            layer_norm_type=str(cfg.get("layer_norm_type", "WithBias")),
+        )
+
         return model.to(device)
     raise ValueError(f"Unsupported downstream model: {model_name}")
 
@@ -2284,11 +2318,22 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
     corpus = OnDemandCorpusDataset(train_ds, manifest, original_indices=indices, return_index=True)
     train_data = CorpusTaskNoiseDataset(corpus, cfg=ctx.cfg, variant=variant)
     model_cfg = downstream_model_cfg(ctx, model_name)
+    if ctx.real_smoke:
+        batch_size = int(ctx.cfg["real_smoke"]["downstream_batch_size"])
+        max_steps = int(ctx.cfg["real_smoke"]["downstream_optimizer_steps"])
+    elif ctx.smoke:
+        batch_size = int(model_cfg["batch_size_smoke"])
+        max_steps = int(model_cfg["max_steps_smoke"])
+    else:
+        batch_size = int(model_cfg["batch_size"])
+        max_steps = int(model_cfg["max_steps"])
+    use_smoke_training_cfg = ctx.smoke or ctx.real_smoke
+
     loader = DataLoader(
         train_data,
-        batch_size=int(model_cfg["batch_size_smoke" if ctx.smoke else "batch_size"]),
+        batch_size=batch_size,
         shuffle=True,
-        num_workers=0 if ctx.smoke else int(ctx.cfg["runtime"]["num_workers"]),
+        num_workers=0 if use_smoke_training_cfg else int(ctx.cfg["runtime"]["num_workers"]),
         generator=torch.Generator().manual_seed(int(ctx.cfg["seeds"]["model_seed"])),
     )
     device = torch.device("cuda" if torch.cuda.is_available() and not ctx.smoke else "cpu")
@@ -2305,14 +2350,30 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
         weight_decay=float(model_cfg.get("weight_decay", 0.0)),
     )
     criterion = nn.MSELoss()
-    max_steps = int(model_cfg["max_steps_smoke" if ctx.smoke else "max_steps"])
-    batch_size = int(model_cfg["batch_size_smoke" if ctx.smoke else "batch_size"])
     log_interval = max(1, int(model_cfg.get("log_interval", 100)))
-    val_interval = max(1, int(model_cfg.get("validation_interval_steps_smoke" if ctx.smoke else "validation_interval_steps", 500)))
+    val_interval = max(
+        1,
+        int(
+            model_cfg.get(
+                "validation_interval_steps_smoke" if use_smoke_training_cfg else "validation_interval_steps",
+                500,
+            )
+        ),
+    )
     early_cfg = dict(model_cfg.get("early_stopping", {}))
-    patience = int(early_cfg.get("patience_smoke" if ctx.smoke else "patience", early_cfg.get("patience", 10)))
+    patience = int(
+        early_cfg.get(
+            "patience_smoke" if use_smoke_training_cfg else "patience",
+            early_cfg.get("patience", 10),
+        )
+    )
     min_delta = float(early_cfg.get("min_delta", 1e-4))
-    warmup_steps = int(early_cfg.get("warmup_steps_smoke" if ctx.smoke else "warmup_steps", early_cfg.get("warmup_steps", 0)))
+    warmup_steps = int(
+        early_cfg.get(
+            "warmup_steps_smoke" if use_smoke_training_cfg else "warmup_steps",
+            early_cfg.get("warmup_steps", 0),
+        )
+    )
     iterator = cycle_loader(loader)
     rows = []
     best_val_loss = float("inf")
@@ -2424,7 +2485,7 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
             "optimizer_steps": int(step),
             "initial_state": str(init_path),
             "initial_state_sha256": sha256_file(init_path),
-            "sample_exposures": int(step * int(model_cfg["batch_size_smoke" if ctx.smoke else "batch_size"])),
+            "sample_exposures": int(step * batch_size),
             "task_noise": ctx.cfg["downstream"]["task_noise"],
             "early_stopping_enabled": True,
             "early_stopping_monitor": "val_loss",
@@ -2523,27 +2584,45 @@ def eval_metrics(pred: torch.Tensor, target: torch.Tensor, lpips_model) -> tuple
 
 
 def model_variant_stages(model_name: str) -> list[tuple[str, str, str]]:
-    prefix = "tdncnn" if model_name == "tdncnn" else "drunet"
+    if model_name not in {"tdncnn", "drunet", "restormer"}:
+        raise ValueError(f"Unsupported downstream model: {model_name}")
+
     return [
-        ("Full", "full", f"{prefix}_full"),
-        ("Top-K 10%", "topk_10", f"{prefix}_topk"),
-        ("Quantile 10%", "quantile_10", f"{prefix}_quantile"),
-        ("Random 10%", "random_10", f"{prefix}_random"),
+        ("Full", "full", f"{model_name}_full"),
+        ("Top-K 10%", "topk_10", f"{model_name}_topk"),
+        ("Quantile 10%", "quantile_10", f"{model_name}_quantile"),
+        ("Random 10%", "random_10", f"{model_name}_random"),
     ]
 
 
 def write_combined_internal_if_ready(ctx: PipelineContext) -> None:
     out_root = ctx.experiment_root / "07_evaluation" / "combined"
-    tdn = ctx.stage_root("tdncnn_evaluate") / "summary_table.csv"
-    dru = ctx.stage_root("drunet_evaluate") / "summary_table.csv"
-    if not (tdn.exists() and dru.exists()):
+
+    result_paths = {
+        "tdncnn": ctx.stage_root("tdncnn_evaluate") / "summary_table.csv",
+        "drunet": ctx.stage_root("drunet_evaluate") / "summary_table.csv",
+        "restormer": ctx.stage_root("restormer_evaluate") / "summary_table.csv",
+    }
+
+    if not all(path.exists() for path in result_paths.values()):
         return
+
     out_root.mkdir(parents=True, exist_ok=True)
-    combined = pd.concat([pd.read_csv(tdn), pd.read_csv(dru)], ignore_index=True)
-    combined.to_csv(out_root / "internal_combined_table.csv", index=False)
-    for model_name in ["tdncnn", "drunet"]:
-        src = ctx.stage_root(f"{model_name}_evaluate") / "summary_table.csv"
-        shutil.copyfile(src, out_root / f"{model_name}_internal_results.csv")
+
+    combined = pd.concat(
+        [pd.read_csv(path) for path in result_paths.values()],
+        ignore_index=True,
+    )
+    combined.to_csv(
+        out_root / "internal_combined_table.csv",
+        index=False,
+    )
+
+    for model_name, src in result_paths.items():
+        shutil.copyfile(
+            src,
+            out_root / f"{model_name}_internal_results.csv",
+        )
 
 
 def stage_evaluate_model(ctx: PipelineContext, model_name: str) -> None:
@@ -2556,6 +2635,7 @@ def stage_evaluate_model(ctx: PipelineContext, model_name: str) -> None:
     if ctx.dry_run:
         print(f"[dry-run] would evaluate {model_name} downstream variants into {ctx.stage_root(stage)}")
         return
+    ctx.stage_root(stage).mkdir(parents=True, exist_ok=True)
     input_path, target_path, manifest_path = create_eval_cache(ctx)
     loader = DataLoader(EvalNoiseDataset(input_path, target_path), batch_size=int(ctx.cfg["evaluation"]["batch_size"]), shuffle=False)
     device = torch.device("cuda" if torch.cuda.is_available() and not ctx.smoke else "cpu")
@@ -2732,6 +2812,7 @@ def stage_summary(ctx: PipelineContext) -> None:
         f"- scores: `{ctx.stage_root('filter') / 'scores_full.csv'}`",
         f"- TDnCNN internal evaluation: `{ctx.stage_root('tdncnn_evaluate') / 'summary_table.csv'}`",
         f"- DRUNet internal evaluation: `{ctx.stage_root('drunet_evaluate') / 'summary_table.csv'}`",
+        f"- Restormer internal evaluation: `{ctx.stage_root('restormer_evaluate') / 'summary_table.csv'}`",
         f"- combined internal evaluation: `{ctx.experiment_root / '07_evaluation' / 'combined' / 'internal_combined_table.csv'}`",
         "",
         "No scientific ImageNet result is implied until the full remote run finishes.",
@@ -2856,6 +2937,8 @@ def run_stage(ctx: PipelineContext, stage: str) -> None:
         stage_evaluate_model(ctx, "tdncnn")
     elif stage == "drunet_evaluate":
         stage_evaluate_model(ctx, "drunet")
+    elif stage == "restormer_evaluate":
+        stage_evaluate_model(ctx, "restormer")
     elif stage in {"external_eval", "tdncnn_external_eval"}:
         stage_external_eval_model(ctx, "tdncnn")
     elif stage == "drunet_external_eval":
@@ -2925,13 +3008,13 @@ def make_context(args: argparse.Namespace) -> PipelineContext:
 def main() -> None:
     args = parse_args()
     ctx = make_context(args)
-    validate_current_protocol("ImageNet-100", ctx.cfg, downstream_models=["tdncnn", "drunet"])
+    validate_current_protocol("ImageNet-100", ctx.cfg, downstream_models=["tdncnn", "drunet", "restormer"])
     print_protocol_summary(
         "ImageNet-100",
         ctx.cfg,
         run_id=ctx.run_id,
         device="cuda" if torch.cuda.is_available() and not ctx.smoke else "cpu",
-        downstream_models=["tdncnn", "drunet"],
+        downstream_models=["tdncnn", "drunet","restormer"],
     )
     if ctx.cfg["dataset"].get("auto_download", False):
         raise RuntimeError("Dataset auto-download is disabled for ImageNet-100")

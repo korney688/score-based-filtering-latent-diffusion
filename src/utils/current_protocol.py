@@ -103,6 +103,15 @@ def validate_current_protocol(domain: str, cfg: dict[str, Any], *, downstream_mo
             if es is None:
                 es = deep_get(cfg, "drunet.early_stopping")
             _validate_early_stopping(f"{domain}.downstream.drunet", es)
+        elif model_name == "restormer":
+            es = deep_get(cfg, "downstream.restormer.early_stopping")
+            if es is None:
+                es = deep_get(cfg, "restormer.early_stopping")
+            _validate_early_stopping(
+                f"{domain}.downstream.restormer",
+                es,
+            )
+
 
 
 def protocol_snapshot(domain: str, cfg: dict[str, Any], *, downstream_models: Iterable[str]) -> dict[str, Any]:

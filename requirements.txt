@@ -16,3 +16,4 @@ pillow==12.2.0
 scikit-image==0.25.2
 torch-fidelity
 torchmetrics==0.11.4
+einops
