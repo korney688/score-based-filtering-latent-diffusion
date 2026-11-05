@@ -89,6 +89,7 @@ score_selection:
 
 filtering:
   batch_size: 64
+  grid_fractions: [0.10, 0.20, 0.30]
   topk_ratio: 0.10
   random_ratio: 0.10
   quantile_ratio: 0.10
@@ -101,7 +102,7 @@ downstream:
   model: TDnCNN
   batch_size: 32
   batch_size_smoke: 4
-  max_steps: 50000
+  max_steps: 60000
   max_steps_smoke: 2
   lr: 0.001
   validation_samples_per_class: 2
@@ -135,7 +136,10 @@ drunet:
   upsample_mode: convtranspose
   batch_size: 64
   batch_size_smoke: 2
-  max_steps: 30480
+  train_num_workers: 0
+  validation_num_workers: 0
+  validation_batch_size: 16
+  max_steps: 50000
   max_steps_smoke: 1
   lr: 0.0001
   weight_decay: 0.0
@@ -165,6 +169,8 @@ external_benchmarks:
   benchmarks: [Kodak24, CBSD68, Urban100]
   sigma: 25
   seed: 42
+  variants: [full, topk_p10, topk_p20, topk_p30]
+  include_all_variants: false
 
 smoke:
   classes: 4

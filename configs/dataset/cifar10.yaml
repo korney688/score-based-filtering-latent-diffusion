@@ -15,7 +15,7 @@ std: [0.5, 0.5, 0.5]
 download: false
 
 paths:
-  data_root: ${hydra:runtime.cwd}/data
-  experiments_root: ${hydra:runtime.cwd}/experiments/cifar10
-  outputs_root: ${hydra:runtime.cwd}/outputs/cifar10
-  checkpoints_root: ${hydra:runtime.cwd}/checkpoints/cifar10
+  data_root: data
+  experiments_root: experiments/cifar10
+  outputs_root: outputs/cifar10
+  checkpoints_root: checkpoints/cifar10

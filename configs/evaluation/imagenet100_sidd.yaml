@@ -1,0 +1,43 @@
+sidd:
+  root: data/sidd/validation
+  noisy_mat_filename: ValidationNoisyBlocksSrgb.mat
+  gt_mat_filename: ValidationGtBlocksSrgb.mat
+  expected_scenes: 40
+  expected_blocks_per_scene: 32
+  expected_block_size: 256
+  channels: 3
+  color_space: sRGB
+  strict_expected_workload: true
+
+source:
+  imagenet_experiment_root: experiments/imagenet100_image_space_variable_awgn_v1/imagenet100_image_space_variable_awgn_001
+  imagenet_config_path: configs/experiments/imagenet100.yaml
+
+variants:
+  - full
+  - topk_p10
+  - topk_p20
+  - topk_p30
+
+runtime:
+  device: cuda
+  tdncnn_batch_size: 8
+  drunet_batch_size: 2
+  num_workers: 0
+  lpips_enabled: true
+
+drunet:
+  official: true
+  primary_sigma_255: 25
+  sensitivity_sigmas_255: [5, 10, 15, 25]
+  assumed_sigma_255: 25
+  assumed_sigma_normalized: 0.09803921568627451
+  sigma_role: primary_pre_registered_condition
+
+statistics:
+  bootstrap_seed: 2026
+  bootstrap_iterations: 1000
+
+outputs:
+  root: experiments/sidd/imagenet100
+  run_id: null

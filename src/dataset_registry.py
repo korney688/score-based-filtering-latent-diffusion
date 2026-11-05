@@ -29,6 +29,15 @@ DATASET_SPECS: dict[str, dict[str, Any]] = {
         "std": (0.5, 0.5, 0.5),
         "display_name": "CIFAR-10",
     },
+    "colored_mnist": {
+        "torchvision_class": datasets.MNIST,
+        "channels": 3,
+        "image_size": 28,
+        "train_size": 60000,
+        "mean": (0.5, 0.5, 0.5),
+        "std": (0.5, 0.5, 0.5),
+        "display_name": "Colored MNIST",
+    },
     "mnist_noisy_gaussian": {
         "torchvision_class": datasets.MNIST,
         "channels": 1,
@@ -176,8 +185,7 @@ def _canonical_corruption_cfg(dataset_cfg: Any | None, train: bool) -> dict[str,
             return None
         return corruption_cfg
 
-    # Backward-compatible support for older MNIST noisy configs without creating
-    # a separate ImageNet-100 dataset mode.
+    # Accept older noisy MNIST configs through the same dataset loader.
     if bool(_cfg_get(dataset_cfg, "noisy_dataset", False)):
         noise_cfg = _cfg_mapping(dataset_cfg, "noise")
         apply_to = str(noise_cfg.get("apply_to", "train")).lower()

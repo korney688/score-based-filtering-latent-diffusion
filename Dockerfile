@@ -6,7 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /workspace
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i 's|http://|https://|g' /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     curl \
@@ -27,7 +28,6 @@ COPY configs/ /workspace/configs/
 COPY scripts/ /workspace/scripts/
 COPY src/ /workspace/src/
 COPY docs/ /workspace/docs/
-COPY tests/ /workspace/tests/
 COPY README.md /workspace/README.md
 
 RUN mkdir -p /workspace/data /workspace/checkpoints /workspace/experiments /workspace/outputs /workspace/logs \

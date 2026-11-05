@@ -1,0 +1,20 @@
+# Reuse the scientific environment and add current source.
+ARG BASE_IMAGE=research-environment:latest
+FROM ${BASE_IMAGE}
+ARG GIT_COMMIT=UNKNOWN
+ARG SOURCE_SHA256=UNKNOWN
+LABEL org.opencontainers.image.revision=${GIT_COMMIT} \
+      project.source_manifest_sha256=${SOURCE_SHA256}
+ENV PROJECT_GIT_COMMIT=${GIT_COMMIT} \
+    PYTHONUNBUFFERED=1 MPLBACKEND=Agg MPLCONFIGDIR=/tmp/matplotlib \
+    OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+WORKDIR /workspace
+COPY src/ /workspace/src/
+COPY scripts/ /workspace/scripts/
+COPY configs/ /workspace/configs/
+COPY requirements.txt Dockerfile.noise-replicates SOURCE_MANIFEST.json /workspace/
+RUN python -m compileall -q src scripts \
+    && bash -n scripts/remote/run_imagenet100_noise_seed_replicates.sh \
+    && command -v flock \
+    && python -c "import torch, scipy, src.imagenet100_pipeline; assert torch.__version__ == '2.7.1+cu118'"
+CMD ["bash", "scripts/remote/run_imagenet100_noise_seed_replicates.sh", "preflight"]

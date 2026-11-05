@@ -2,16 +2,13 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from src.external.drunet.network_unet import UNetRes
 
 
 class DRUNetPlaceholder(nn.Module):
-    """Lightweight DRUNet-compatible model for smoke checks.
-
-    Production runs use ``OfficialDRUNetAdapter``. This fallback keeps the same
-    public API so command-line plumbing and dataloader construction can be
-    validated without instantiating the full network.
+    """Small DRUNet-compatible model for smoke checks.
     """
 
     is_placeholder = True
@@ -36,18 +33,15 @@ class DRUNetPlaceholder(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor, sigma: torch.Tensor | None = None) -> torch.Tensor:
-        # Keep the same signature as the official adapter; this fallback is not
-        # noise-level conditioned.
+        # Accept sigma for API compatibility; this small model does not use it.
         residual = self.net(x)
         return x - residual
 
 
 class OfficialDRUNetAdapter(nn.Module):
-    """Adapter preserving the project DRUNet API for the official DPIR UNetRes.
+    """Wrap the official DPIR UNetRes with ``forward(x, sigma=None)``.
 
-    Official DRUNet receives the noise level as an extra spatial map channel,
-    not as a separate forward argument. This adapter keeps the public project
-    contract ``forward(x, sigma=None)`` and prepares the 4-channel input.
+    Add sigma as a fourth input channel alongside the RGB image.
     """
 
     is_placeholder = False
@@ -118,9 +112,15 @@ class OfficialDRUNetAdapter(nn.Module):
         if x.shape[1] != self.in_channels:
             raise ValueError(f"x must have {self.in_channels} channels, got {x.shape[1]}")
 
+        height, width = x.shape[-2:]
         sigma_map = self._sigma_to_map(sigma, x)
         conditioned_input = torch.cat([x, sigma_map], dim=1)
-        return self.net(conditioned_input)
+        pad_h = (8 - height % 8) % 8
+        pad_w = (8 - width % 8) % 8
+        if pad_h or pad_w:
+            conditioned_input = F.pad(conditioned_input, (0, pad_w, 0, pad_h), mode="replicate")
+        output = self.net(conditioned_input)
+        return output[..., :height, :width]
 
 
 def build_drunet(
@@ -134,11 +134,7 @@ def build_drunet(
     downsample_mode: str = "strideconv",
     upsample_mode: str = "convtranspose",
 ) -> nn.Module:
-    """Build a DRUNet-compatible denoiser.
-
-    ``official=False`` keeps the lightweight fallback for smoke checks.
-    ``official=True`` builds the official DPIR UNetRes behind a project API
-    adapter that accepts ``forward(x, sigma=None)``.
+    """Build the official DRUNet adapter or a small model for smoke checks.
     """
 
     if official:

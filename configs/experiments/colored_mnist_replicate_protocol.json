@@ -1,0 +1,29 @@
+{
+  "status": "PREPARED_NOT_STARTED_FULL_CANONICAL_RECOMPUTE",
+  "corpus_seeds": [
+    42,
+    43,
+    44
+  ],
+  "color_seed": 42,
+  "background_seed": 42,
+  "validation_ladder_seed": 42,
+  "tdncnn_max_optimizer_steps": 20000,
+  "drunet_max_steps": 20000,
+  "validation_interval": 100,
+  "patience": 10,
+  "warmup": 100,
+  "min_delta": 0.0001,
+  "checkpoint_selection": "true minimum validation loss; min_delta controls patience only",
+  "protected_legacy_root": "experiments/colored_mnist/colored_mnist_001",
+  "canonical_seed42_root": "experiments/colored_mnist/colored_mnist_001_seed42_canonical",
+  "recompute_seed42": "Full pipeline: prepare, DDPM, validation, score selection, filtering, 20 downstream branches, evaluation, figures, summary",
+  "reason": "Historical config/source anchor and score-to-checkpoint/corpus content binding are ambiguous; strict audit forbids reuse",
+  "upstream_reuse": false,
+  "upstream_reuse_verdict": "REUSE_BLOCKED_FULL_RECOMPUTE",
+  "sequence": [
+    42,
+    43,
+    44
+  ]
+}

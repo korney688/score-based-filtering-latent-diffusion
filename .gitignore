@@ -73,13 +73,47 @@ mlruns/
 *.html
 .ipynb_checkpoints/
 
-# Project documentation is tracked. Generated reports inside ignored
-# experiment/tmp/output roots stay ignored through their parent folders.
-
 # Local archival folders
 legacy/
 archive_legacy/
 archive_unused/
 
-# Local validation scripts kept out of the public repository
+
+# Publication excludes runtime evidence, model binaries and local infrastructure.
+results_final/
+results/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.download-part
+SOURCE_MANIFEST.json
+repomix*.xml
+*.key
+*.pem
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+credentials/
+secrets/
+.local/
+.env
+.env.*
+!.env.example
+
+# Local tests and test dependencies
 tests/
+test_*.py
+*_test.py
+smoke_*.py
+pytest.ini
+requirements-dev.txt
+
+# Local reference documentation
+/docs/methodology.md
+/docs/external_benchmarks.md
+/docs/repository_structure.md
+/docs/public_environment.md
+/docs/reproducibility.md

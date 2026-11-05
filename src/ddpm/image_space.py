@@ -18,11 +18,9 @@ def _cfg_get(cfg: Any | None, key: str, default: Any) -> Any:
 
 
 class ImageSpaceDDPM(nn.Module):
-    """Image-space epsilon-prediction DDPM wrapper.
+    """Image-space DDPM that predicts epsilon.
 
-    Checkpoints in the current CIFAR validation pipeline store only
-    ``model.state_dict()``, so this wrapper keeps the trainable UNet under the
-    same ``.model`` attribute used by the previous runner.
+    Keep the UNet under ``.model`` to match the checkpoint keys.
     """
 
     prediction_type = "epsilon"
@@ -42,6 +40,7 @@ class ImageSpaceDDPM(nn.Module):
         self.device = torch.device(device)
         self.model = nn_model.to(self.device)
 
+        # Use a linear beta schedule with buffer names matching the checkpoints.
         betas = torch.linspace(float(beta_start), float(beta_end), self.n_steps, device=self.device)
         self.register_buffer("betas", betas)
         self.register_buffer("alphas", 1.0 - betas)
@@ -53,6 +52,7 @@ class ImageSpaceDDPM(nn.Module):
     def q_sample(self, x_0: torch.Tensor, t: torch.Tensor, noise: torch.Tensor | None = None) -> torch.Tensor:
         if noise is None:
             noise = torch.randn_like(x_0)
+        # Sample q(x_t | x_0) using cumulative alpha and unit Gaussian noise.
         alpha_bar_t = self.alphas_cumprod[t].view(-1, 1, 1, 1)
         return torch.sqrt(alpha_bar_t) * x_0 + torch.sqrt(1.0 - alpha_bar_t) * noise
 
@@ -62,6 +62,7 @@ class ImageSpaceDDPM(nn.Module):
         t = torch.randint(0, self.n_steps, (batch_size,), device=self.device)
         noise = torch.randn_like(x_0)
         x_t = self.q_sample(x_0, t, noise)
+        # Train the model to predict the sampled Gaussian noise.
         eps_pred = self.model(x_t, t)
         return F.mse_loss(eps_pred, noise)
 
@@ -78,8 +79,8 @@ def build_image_space_ddpm_model(
     beta_end: float = 0.02,
 ) -> ImageSpaceDDPM:
     channels = int(in_channels or _cfg_get(dataset_cfg, "in_channels", _cfg_get(dataset_cfg, "channels", 3)))
-    kernel_sizes = [3 for _ in range(int(deep))]
-    strides = [2 for _ in range(int(deep))]
+    kernel_sizes = [3] * int(deep)
+    strides = [2] * int(deep)
     nn_model = UNet(
         in_channels=channels,
         out_channels=channels,

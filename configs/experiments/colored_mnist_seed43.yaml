@@ -1,15 +1,20 @@
 dataset:
-  name: mnist
+  name: colored_mnist
   torchvision_name: MNIST
   data_root: data
   download: false
-  channels: 1
+  channels: 3
   image_size: 28
   num_classes: 10
+  colorization:
+    enabled: true
+    mode: abstract_background
+    color_seed: 42
+    background_seed: 42
 
 experiment:
-  root: experiments/mnist
-  run_id: mnist_001
+  root: experiments/colored_mnist
+  run_id: colored_mnist_001_seed43
 
 protocol:
   domain: image
@@ -27,7 +32,7 @@ protocol:
     methods: [full, topk, quantile_spread, random]
 
 seeds:
-  corpus_seed: 42
+  corpus_seed: 43
   split_seed: 42
   model_seed: 42
   forward_noise_seed: 777
@@ -43,6 +48,8 @@ corpus:
 
 ddpm:
   prediction_type: epsilon
+  input_channels: 3
+  output_channels: 3
   T: 1000
   beta_schedule: linear
   beta_start: 0.0001
@@ -74,6 +81,7 @@ score_validation:
 
 filtering:
   ratio: 0.10
+  grid_fractions: [0.10, 0.20, 0.30]
   topk_direction: minimum_score
   random_seed: 42
   quantile_min_points_per_bin: 30
@@ -81,8 +89,15 @@ filtering:
 
 downstream:
   model: TDnCNN
+  budget_mode: main
+  diagnostic_equal_epochs:
+    enabled: false
+    target_effective_epochs: null
+  tdncnn:
+    num_layers: 8
+    features: 64
   batch_size: 128
-  max_optimizer_steps: 2000
+  max_optimizer_steps: 20000
   lr: 0.001
   validation_fraction: 0.10
   validation_seed: 43
@@ -101,6 +116,30 @@ downstream:
     sigma_max: 0.8
     version: mnist_task_awgn_v1
 
+drunet:
+  model: DRUNet
+  official: true
+  official_smoke: false
+  features: 64
+  num_layers: 5
+  nc: [64, 128, 256, 512]
+  nb: 4
+  act_mode: R
+  downsample_mode: strideconv
+  upsample_mode: convtranspose
+  batch_size: 64
+  max_steps: 20000
+  lr: 0.0001
+  weight_decay: 0.0
+  validation_interval_steps: 100
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    mode: min
+    patience: 10
+    min_delta: 0.0001
+    warmup_steps: 100
+
 evaluation:
   batch_size: 256
   eval_noise:
@@ -108,6 +147,13 @@ evaluation:
     sigma_min: 0.1
     sigma_max: 0.8
     version: mnist_eval_awgn_v1
+
+external:
+  root: data/external_benchmarks
+  benchmarks: [Kodak24, CBSD68, Urban100]
+  sigma: 25
+  seed: 42
+  lpips: false
 
 smoke:
   synthetic: true
@@ -129,3 +175,9 @@ smoke:
   downstream_validation_interval_steps: 1
   downstream_early_stopping_patience: 2
   downstream_early_stopping_warmup_steps: 0
+  drunet_official: false
+  drunet_max_optimizer_steps: 1
+  drunet_batch_size: 4
+  drunet_validation_interval_steps: 1
+  drunet_early_stopping_patience: 2
+  drunet_early_stopping_warmup_steps: 0

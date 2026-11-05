@@ -101,7 +101,6 @@ class _EncoderBlock(nn.Module):
         self.max_pool = nn.MaxPool2d(kernel_size=stride, stride=stride)
 
     def forward(self, x: torch.Tensor, time_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # Return both the downsampled tensor and the skip connection
         skip = self.block(x, time_emb)
         x = self.max_pool(skip)
         return x, skip
@@ -176,7 +175,6 @@ class UNet(nn.Module):
 
         self.time_dim = time_dim
 
-        # The number of encoder blocks is controlled by the number of strides.
         deep_lvl = len(strides)
         self.features = [base_dim * (2**i) for i in range(deep_lvl)]
 
@@ -219,7 +217,6 @@ class UNet(nn.Module):
                 )
             )
 
-        # Map the last hidden channels back to the requested output channels.
         self.final_conv = nn.Conv2d(base_dim, out_channels, kernel_size=1)
 
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:

@@ -40,6 +40,16 @@ def tensor_class_id(sample: Any) -> tuple[torch.Tensor, int]:
     return x.to(torch.float32).clamp(0.0, 1.0), class_id
 
 
+def _dataset_metadata(dataset: Dataset, original_index: int) -> dict[str, Any]:
+    provider = getattr(dataset, "metadata_for_original_index", None)
+    if provider is None:
+        return {}
+    metadata = provider(int(original_index))
+    if not isinstance(metadata, dict):
+        raise TypeError("metadata_for_original_index must return a dict")
+    return metadata
+
+
 def _metric_row(
     *,
     x_clean: torch.Tensor,
@@ -114,6 +124,7 @@ def materialize_variable_awgn_corpus(
                 "corruption_type": "variable_awgn_quality",
                 "corruption_version": corruption_version,
                 "cache_key": cache_key,
+                **_dataset_metadata(dataset, int(original_index)),
             }
         )
         corpus_tensors.append(x_corpus)
@@ -168,6 +179,7 @@ def materialize_eval_noise_cache(
                 "sigma": sigma,
                 **metric_values,
                 "eval_noise_version": eval_noise_version,
+                **_dataset_metadata(dataset, int(original_index)),
             }
         )
         inputs.append(x_input)

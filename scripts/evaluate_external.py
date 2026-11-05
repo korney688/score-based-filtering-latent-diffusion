@@ -39,6 +39,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--full-checkpoint", type=Path, default=None)
     parser.add_argument("--topk-checkpoint", type=Path, default=None)
     parser.add_argument("--quantile-checkpoint", type=Path, default=None)
+    parser.add_argument(
+        "--variant-checkpoint",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH",
+        help="Evaluate an arbitrary named variant checkpoint. May be passed multiple times.",
+    )
     parser.add_argument("--dataset", choices=BENCHMARKS, default=None, help="Single benchmark to evaluate.")
     parser.add_argument("--all-benchmarks", action="store_true", help="Evaluate Kodak24, CBSD68, and Urban100.")
     parser.add_argument("--root", type=Path, default=Path("data/external_benchmarks"))
@@ -362,8 +369,8 @@ def markdown_table(df: pd.DataFrame) -> str:
 
 def font(size: int, bold: bool = False):
     candidates = [
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/calibrib.ttf" if bold else "C:/Windows/Fonts/calibri.ttf",
+        "arialbd.ttf" if bold else "arial.ttf",
+        "calibrib.ttf" if bold else "calibri.ttf",
     ]
     for candidate in candidates:
         if Path(candidate).exists():
@@ -507,6 +514,119 @@ def evaluate_tdncnn_variants(args: argparse.Namespace) -> None:
     print(f"panel={args.output_root / 'all_benchmarks_panel.png'}")
 
 
+def parse_variant_checkpoints(items: list[str]) -> dict[str, Path]:
+    checkpoints: dict[str, Path] = {}
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"--variant-checkpoint must use LABEL=PATH, got {item!r}")
+        label, raw_path = item.split("=", 1)
+        label = label.strip()
+        if not label:
+            raise SystemExit(f"--variant-checkpoint label is empty: {item!r}")
+        checkpoints[label] = Path(raw_path.strip())
+    return checkpoints
+
+
+def write_dynamic_panel(output: Path, representatives: dict[str, dict[str, torch.Tensor]], metrics: pd.DataFrame, variants: list[str]) -> None:
+    cols = ["Clean target", "Noisy input", *variants]
+    img_w, img_h = 300, 220
+    label_h, row_label_w = 76, 150
+    width = row_label_w + len(cols) * img_w + 40
+    height = label_h + len(BENCHMARKS) * (img_h + 82) + 30
+    canvas = Image.new("RGB", (max(width, 1600), height), "white")
+    draw = ImageDraw.Draw(canvas)
+    header_font = font(22, True)
+    small_font = font(14)
+    for c, col in enumerate(cols):
+        draw.text((row_label_w + c * img_w + 16, 20), col, font=header_font, fill=(0, 0, 0))
+    for r, benchmark in enumerate(BENCHMARKS):
+        y = label_h + r * (img_h + 82)
+        draw.text((18, y + 85), benchmark, font=header_font, fill=(0, 0, 0))
+        item = representatives.get(benchmark)
+        if item is None:
+            continue
+        for c, col in enumerate(cols):
+            x = row_label_w + c * img_w + 14
+            canvas.paste(tensor_image(item[col], img_w - 24, img_h), (x, y))
+            if col in variants:
+                row = metrics[(metrics["Benchmark"] == benchmark) & (metrics["Variant"] == col)]
+                if not row.empty and pd.notna(row.iloc[0]["PSNR"]):
+                    text = f"PSNR {row.iloc[0]['PSNR']:.2f}\nSSIM {row.iloc[0]['SSIM']:.3f}"
+                    draw.multiline_text((x, y + img_h + 5), text, font=small_font, fill=(0, 0, 0), spacing=2)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output)
+
+
+def evaluate_dynamic_variants(args: argparse.Namespace) -> None:
+    args.output_root.mkdir(parents=True, exist_ok=True)
+    audit = audit_datasets(args.root, args.output_root)
+    missing_roots = [
+        name
+        for name in BENCHMARKS
+        if not bool(audit["benchmarks"][name]["exists"]) or int(audit["benchmarks"][name]["file_count"]) == 0
+    ]
+    if missing_roots:
+        raise FileNotFoundError(
+            "External benchmark data root is missing or empty for "
+            f"{missing_roots}. Passed --root={args.root}."
+        )
+    checkpoints = parse_variant_checkpoints(args.variant_checkpoint)
+    missing = [name for name, path in checkpoints.items() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Missing checkpoint(s): {missing}")
+    protocol = {
+        "model_type": args.model_type,
+        "benchmarks": BENCHMARKS,
+        "sigma": int(args.sigma),
+        "sigma_normalized": float(args.sigma / 255.0),
+        "seed": int(args.seed),
+        "status_by_benchmark": {name: audit["benchmarks"][name]["status"] for name in BENCHMARKS},
+        "checkpoints": {name: str(path.resolve()) for name, path in checkpoints.items()},
+        "max_images": args.max_images,
+    }
+    try:
+        import yaml
+
+        (args.output_root / "protocol.yaml").write_text(yaml.safe_dump(protocol, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    except Exception:
+        (args.output_root / "protocol.yaml").write_text(json.dumps(protocol, indent=2, ensure_ascii=False), encoding="utf-8")
+    device = torch.device(args.device)
+    lpips_model = create_lpips_model(device) if args.lpips else None
+    loader = load_tdncnn_checkpoint if args.model_type == "tdncnn" else load_drunet_checkpoint
+    models = {name: loader(path, device) for name, path in checkpoints.items()}
+    per_rows = []
+    representatives: dict[str, dict[str, torch.Tensor]] = {}
+    for benchmark in BENCHMARKS if args.all_benchmarks else (args.dataset,):
+        audit_item = audit["benchmarks"][benchmark]
+        pairs = load_pairs_for_status(args.root, benchmark, audit_item, args.sigma, args.seed, args.max_images)
+        for image_idx, pair in enumerate(tqdm(pairs, desc=f"External {benchmark}")):
+            clean = pair["clean"]
+            noisy = pair["noisy"]
+            noisy_metrics = compute_metrics(noisy, clean, lpips_model)
+            per_rows.append({"Benchmark": benchmark, "Variant": "Noisy input", "Image": pair["image"], **noisy_metrics})
+            rep_payload = {"Clean target": clean, "Noisy input": noisy}
+            for variant, model in models.items():
+                pred = predict_model(model, noisy, args.model_type, args.sigma / 255.0, device)
+                metric_row = compute_metrics(pred, clean, lpips_model)
+                per_rows.append({"Benchmark": benchmark, "Variant": variant, "Image": pair["image"], **metric_row})
+                if image_idx == 0:
+                    rep_payload[variant] = pred
+                    save_qualitative(args.output_root / "qualitative" / benchmark / variant, Path(pair["image"]).stem, clean, noisy, pred)
+            if image_idx == 0:
+                representatives[benchmark] = rep_payload
+    per_image = pd.DataFrame(per_rows)
+    per_image.to_csv(args.output_root / "per_image_metrics.csv", index=False)
+    summary = summarize_metrics(per_image[per_image["Variant"] != "Noisy input"])
+    summary.to_csv(args.output_root / "summary_metrics.csv", index=False)
+    (args.output_root / "summary_metrics.md").write_text(markdown_table(summary) + "\n", encoding="utf-8")
+    write_dynamic_panel(args.output_root / "all_benchmarks_panel.png", representatives, summary, list(checkpoints))
+    print(f"dataset_audit={args.output_root / 'dataset_audit.md'}")
+    print(f"protocol={args.output_root / 'protocol.yaml'}")
+    print(f"per_image_metrics={args.output_root / 'per_image_metrics.csv'}")
+    print(f"summary_metrics={args.output_root / 'summary_metrics.csv'}")
+    print(f"panel={args.output_root / 'all_benchmarks_panel.png'}")
+
+
 def evaluate_benchmark(
     model: torch.nn.Module,
     benchmark_name: str,
@@ -627,6 +747,9 @@ def main() -> None:
         audit_datasets(args.root, args.output_root)
         print(f"dataset_audit={args.output_root / 'dataset_audit.md'}")
         print(f"external_benchmarks_dataset_audit={args.output_root / 'external_benchmarks_dataset_audit.md'}")
+        return
+    if args.variant_checkpoint:
+        evaluate_dynamic_variants(args)
         return
     if args.model_type == "tdncnn":
         evaluate_tdncnn_variants(args)

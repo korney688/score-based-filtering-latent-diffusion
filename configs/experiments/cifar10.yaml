@@ -8,7 +8,7 @@ dataset:
 
 experiment:
   root: experiments/cifar10
-  run_id: cifar10_001
+  run_id: cifar10_001_final_20260901
 
 runtime:
   num_workers: 0
@@ -35,6 +35,7 @@ seeds:
   model_seed: 42
   forward_noise_seed: 777
   subset_seed: 42
+  task_noise_seed: 4242
   bootstrap_seed: 123
 
 corruption:
@@ -76,6 +77,7 @@ score_selection:
     class_coverage_rule: random_relative_or_absolute
 
 filtering:
+  grid_fractions: [0.10, 0.20, 0.30]
   ratio: 0.10
   topk_ratio: 0.10
   quantile_ratio: 0.10
@@ -88,7 +90,7 @@ filtering:
 downstream:
   tdncnn:
     batch_size: 32
-    max_optimizer_steps: null
+    max_optimizer_steps: 60000
     lr: 0.001
     validation_interval_steps: 500
     early_stopping:
@@ -100,7 +102,7 @@ downstream:
       warmup_steps: 1000
   drunet:
     batch_size: 64
-    max_optimizer_steps: null
+    max_optimizer_steps: 50000
     lr: 0.0001
     weight_decay: 0.0
     status: enabled_for_new_current_image_space_selected_subsets
@@ -127,15 +129,19 @@ evaluation:
     seed: 42
 
 external:
+  root: data/external_benchmarks
   benchmarks: [Kodak24, CBSD68, Urban100]
   sigma: 25
   seed: 42
+  variants: [full, topk_p10, topk_p20, topk_p30]
+  include_all_variants: false
 
 smoke:
   enabled: false
+  eval_images: 16
   downstream_max_optimizer_steps: 2
   downstream_batch_size: 4
   downstream_validation_interval_steps: 1
   downstream_early_stopping_patience: 2
   downstream_early_stopping_warmup_steps: 0
-  drunet_official: false
+  drunet_official: true

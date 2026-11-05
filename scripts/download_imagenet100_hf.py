@@ -1,12 +1,7 @@
 """Download ImageNet-100 from Hugging Face into ImageFolder layout.
 
-This utility is intentionally separate from the training pipeline. It prepares:
-
-    data/imagenet100/train/<class>/*
-    data/imagenet100/val/<class>/*
-
-Source dataset:
-    https://huggingface.co/datasets/asafaa/imagent100
+Output: data/imagenet100/{train,val}/<class>/*.
+Source: https://huggingface.co/datasets/asafaa/imagent100
 """
 
 from __future__ import annotations
@@ -106,8 +101,7 @@ def _merge_directory_contents(source: Path, destination: Path) -> None:
 
 
 def normalize_imagefolder_layout(output_dir: Path) -> None:
-    # Some prepared archives include an extra top-level directory. Normalize the
-    # result to output_dir/train and output_dir/val without changing class names.
+    # Remove an extra archive directory while keeping the class names.
     for split in ("train", "val"):
         expected = output_dir / split
         if expected.exists():

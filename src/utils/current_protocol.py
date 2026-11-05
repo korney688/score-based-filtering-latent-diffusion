@@ -4,7 +4,6 @@ import json
 import math
 import time
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any, Iterable
 
 
@@ -72,10 +71,15 @@ def _validate_early_stopping(prefix: str, cfg: dict[str, Any]) -> None:
 
 
 def validate_current_protocol(domain: str, cfg: dict[str, Any], *, downstream_models: Iterable[str]) -> None:
-    """Validate scientific invariants shared by MNIST, CIFAR-10, and ImageNet-100."""
+    """Check the shared MNIST, CIFAR-10, and ImageNet-100 settings."""
     _assert_ladder(f"{domain}.score_validation.psnr_ladder", deep_get(cfg, "score_validation.psnr_ladder"))
 
     filtering = cfg.get("filtering", {})
+    if "grid_fractions" in filtering:
+        got_grid = [float(x) for x in filtering.get("grid_fractions", [])]
+        expected_grid = [0.10, 0.20, 0.30]
+        if len(got_grid) != len(expected_grid) or any(not math.isclose(a, b, rel_tol=0.0, abs_tol=1e-12) for a, b in zip(got_grid, expected_grid)):
+            raise ProtocolError(f"{domain}.filtering.grid_fractions must be {expected_grid}, got {got_grid}")
     if "ratio" in filtering:
         _assert_fraction(f"{domain}.filtering.ratio", filtering.get("ratio"))
     for key in ("topk_ratio", "quantile_ratio", "random_ratio"):
@@ -106,6 +110,8 @@ def validate_current_protocol(domain: str, cfg: dict[str, Any], *, downstream_mo
 
 
 def protocol_snapshot(domain: str, cfg: dict[str, Any], *, downstream_models: Iterable[str]) -> dict[str, Any]:
+    raw_grid = deep_get(cfg, "filtering.grid_fractions", deep_get(cfg, "filtering.fractions", [FILTER_FRACTION]))
+    grid = [f"{int(round(float(x) * 100.0))}%" for x in raw_grid]
     return {
         "domain": domain,
         "corruption": {
@@ -124,10 +130,10 @@ def protocol_snapshot(domain: str, cfg: dict[str, Any], *, downstream_models: It
         },
         "filtering": {
             "full": "100%",
-            "topk": "10%",
+            "topk": grid,
             "topk_direction": TOPK_DIRECTION,
-            "quantile_spread": "10%",
-            "random": "10%",
+            "quantile_spread": grid,
+            "random": grid,
             "random_without_replacement": RANDOM_WITHOUT_REPLACEMENT,
         },
         "downstream": {
@@ -269,11 +275,3 @@ def stage_logging(domain: str, stage: str, *, run_id: str | None = None):
         raise
     else:
         stage_done(stage, start)
-
-
-def write_protocol_snapshot(path: Path, domain: str, cfg: dict[str, Any], *, downstream_models: Iterable[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(protocol_snapshot(domain, cfg, downstream_models=downstream_models), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )

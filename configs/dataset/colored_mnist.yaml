@@ -1,0 +1,26 @@
+defaults:
+  - _self_
+
+slug: colored_mnist
+name: Colored MNIST
+torchvision_name: MNIST
+dataset_mode: clean
+channels: 3
+in_channels: 3
+out_channels: 3
+image_size: 28
+num_classes: 10
+mean: [0.5, 0.5, 0.5]
+std: [0.5, 0.5, 0.5]
+download: false
+colorization:
+  enabled: true
+  mode: abstract_background
+  color_seed: 42
+  background_seed: 42
+
+paths:
+  data_root: ${hydra:runtime.cwd}/data
+  experiments_root: ${hydra:runtime.cwd}/experiments/colored_mnist
+  outputs_root: ${hydra:runtime.cwd}/outputs/colored_mnist
+  checkpoints_root: ${hydra:runtime.cwd}/checkpoints/colored_mnist

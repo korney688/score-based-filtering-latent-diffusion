@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import platform
 import shutil
 import subprocess
@@ -20,20 +19,21 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from skimage.metrics import structural_similarity as skimage_ssim
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
-from torchvision.transforms.functional import to_tensor
 from tqdm import tqdm
 
 from src.DRUNet_image import build_drunet
 from src.TDnCNN_image import DnCNN_2D, align_lpips_scaling_layer, prepare_for_lpips
 from src.Unet_model import UNet
-from src.dataset_registry import load_dataset_config
 from src.filtering.selection import select_quantile_spread_exact
 from src.corruption_datasets import stable_int_seed
+from src.evaluation.denoiser_panels import save_denoiser_comparison_panel
+from src.evaluation.quality_shift_plots import plot_ecdf_realized_psnr, plot_quality_shift_3x3, plot_subset_fraction_metric
+from src.evaluation.selection_panels import save_topk_cleanest_noisiest, save_topk_selection_examples
 from src.utils.current_protocol import (
     print_protocol_summary,
     should_log_progress,
@@ -52,23 +52,50 @@ STAGE_DIRS = {
     "score_validate": "03_score_validation",
     "score_select": "04_selected_score_config",
     "filter": "05_filtering",
+    "filter_grid": "05_filtering",
     "tdncnn_full": "06_downstream/tdncnn/full",
-    "tdncnn_topk": "06_downstream/tdncnn/topk_10",
-    "tdncnn_quantile": "06_downstream/tdncnn/quantile_10",
-    "tdncnn_random": "06_downstream/tdncnn/random_10",
+    "tdncnn_topk": "06_downstream/tdncnn/topk_p10",
+    "tdncnn_quantile": "06_downstream/tdncnn/quantile_p10",
+    "tdncnn_random": "06_downstream/tdncnn/random_p10",
+    "tdncnn_topk_p10": "06_downstream/tdncnn/topk_p10",
+    "tdncnn_quantile_p10": "06_downstream/tdncnn/quantile_p10",
+    "tdncnn_random_p10": "06_downstream/tdncnn/random_p10",
+    "tdncnn_topk_p20": "06_downstream/tdncnn/topk_p20",
+    "tdncnn_topk_p30": "06_downstream/tdncnn/topk_p30",
+    "tdncnn_quantile_p20": "06_downstream/tdncnn/quantile_p20",
+    "tdncnn_quantile_p30": "06_downstream/tdncnn/quantile_p30",
+    "tdncnn_random_p20": "06_downstream/tdncnn/random_p20",
+    "tdncnn_random_p30": "06_downstream/tdncnn/random_p30",
+    "tdncnn_grid": "06_downstream/tdncnn",
     "tdncnn_evaluate": "07_evaluation/tdncnn",
     "tdncnn_external_eval": "08_external_benchmarks/tdncnn",
     "drunet_full": "06_downstream/drunet/full",
-    "drunet_topk": "06_downstream/drunet/topk_10",
-    "drunet_quantile": "06_downstream/drunet/quantile_10",
-    "drunet_random": "06_downstream/drunet/random_10",
+    "drunet_topk": "06_downstream/drunet/topk_p10",
+    "drunet_quantile": "06_downstream/drunet/quantile_p10",
+    "drunet_random": "06_downstream/drunet/random_p10",
+    "drunet_topk_p10": "06_downstream/drunet/topk_p10",
+    "drunet_quantile_p10": "06_downstream/drunet/quantile_p10",
+    "drunet_random_p10": "06_downstream/drunet/random_p10",
+    "drunet_topk_p20": "06_downstream/drunet/topk_p20",
+    "drunet_topk_p30": "06_downstream/drunet/topk_p30",
+    "drunet_quantile_p20": "06_downstream/drunet/quantile_p20",
+    "drunet_quantile_p30": "06_downstream/drunet/quantile_p30",
+    "drunet_random_p20": "06_downstream/drunet/random_p20",
+    "drunet_random_p30": "06_downstream/drunet/random_p30",
+    "drunet_grid": "06_downstream/drunet",
     "drunet_evaluate": "07_evaluation/drunet",
     "drunet_external_eval": "08_external_benchmarks/drunet",
-    # Backward-compatible aliases for the original TDnCNN-only stage names.
+    "evaluate_grid": "07_evaluation",
+    "figures_grid": "08_figures",
+    "external_grid": "08_external_benchmarks",
+    "summary_grid": "09_summary",
+    "grid_all": "09_summary",
+    "downstream_early_stopping_audit": "00_protocol/downstream_early_stopping_audit",
+    # Accept the older TDnCNN stage names.
     "downstream_full": "06_downstream/tdncnn/full",
-    "downstream_topk": "06_downstream/tdncnn/topk_10",
-    "downstream_quantile": "06_downstream/tdncnn/quantile_10",
-    "downstream_random": "06_downstream/tdncnn/random_10",
+    "downstream_topk": "06_downstream/tdncnn/topk_p10",
+    "downstream_quantile": "06_downstream/tdncnn/quantile_p10",
+    "downstream_random": "06_downstream/tdncnn/random_p10",
     "evaluate": "07_evaluation/tdncnn",
     "external_eval": "08_external_benchmarks/tdncnn",
     "summary": "09_summary",
@@ -256,12 +283,14 @@ def deterministic_corruption(
     psnr_min: float,
     psnr_max: float,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
+    # Seed corpus noise by image identity so loader order does not affect it.
     sample_seed = stable_int_seed(dataset_name, split, int(original_index), int(corpus_seed), corruption_version)
-    gen = torch.Generator().manual_seed(sample_seed)
-    u = torch.rand((), generator=gen).item()
-    target_psnr_db = float(psnr_min + (psnr_max - psnr_min) * u)
+    generator = torch.Generator().manual_seed(sample_seed)
+    psnr_uniform = torch.rand((), generator=generator).item()
+    target_psnr_db = float(psnr_min + (psnr_max - psnr_min) * psnr_uniform)
+    # Set sigma from target PSNR; clipping can change the measured PSNR.
     sigma = float(10.0 ** (-target_psnr_db / 20.0))
-    base_noise = torch.randn(x_clean.shape, generator=gen, dtype=x_clean.dtype)
+    base_noise = torch.randn(x_clean.shape, generator=generator, dtype=x_clean.dtype)
     x_preclip = x_clean + sigma * base_noise
     x_corpus = x_preclip.clamp(0.0, 1.0).to(torch.float32)
     return x_corpus, {
@@ -342,7 +371,7 @@ class OnDemandCorpusDataset(Dataset):
         _ = torch.rand((), generator=gen).item()
         base_noise = torch.randn(x_clean.shape, generator=gen, dtype=x_clean.dtype)
         x = (x_clean + sigma * base_noise).clamp(0.0, 1.0).to(torch.float32)
-        # Recomputeing from target_psnr_db catches manifest corruption in smoke tests.
+        # Recompute sigma from target PSNR to check the noise manifest.
         expected_sigma = 10.0 ** (-psnr_min / 20.0)
         if abs(expected_sigma - sigma) > 1e-10:
             raise RuntimeError(f"Manifest sigma mismatch for original_index={original_index}")
@@ -368,7 +397,6 @@ class CorpusTaskNoiseDataset(Dataset):
         seed = stable_int_seed(
             self.cfg["dataset"]["name"],
             "downstream_task_noise",
-            self.variant,
             int(original_index),
             int(self.cfg["seeds"]["task_noise_seed"]),
             str(self.noise_cfg["version"]),
@@ -559,18 +587,16 @@ def score_batch(
     seed_group: int = 0,
 ) -> tuple[np.ndarray, np.ndarray]:
     device = model.device
-    x0 = normalize_for_ddpm(x_01).to(device)
-    batch = int(x0.shape[0])
-    t = torch.full((batch,), int(code_timestep_index), dtype=torch.long, device=device)
-    acc = torch.zeros(batch, device=device)
-    acc_sq = torch.zeros(batch, device=device)
+    normalized_images = normalize_for_ddpm(x_01).to(device)
+    batch = int(normalized_images.shape[0])
+    timesteps = torch.full((batch,), int(code_timestep_index), dtype=torch.long, device=device)
+    score_sum = torch.zeros(batch, device=device)
+    squared_score_sum = torch.zeros(batch, device=device)
     for mc_pos, mc_seed in enumerate(seed_bank):
         noises = []
         for row_pos, original_index in enumerate(original_indices.tolist()):
-            if paired_level_count is None:
-                seed_index = int(original_index)
-            else:
-                seed_index = int(original_index)
+            # Use the same image index to seed noise across paired levels.
+            seed_index = int(original_index)
             seed = stable_int_seed(
                 "imagenet100_image_space",
                 "forward_noise",
@@ -580,17 +606,18 @@ def score_batch(
                 int(mc_pos),
                 int(seed_group),
             )
-            gen = torch.Generator().manual_seed(seed)
-            noises.append(torch.randn(x0[row_pos].shape, generator=gen, dtype=x0.dtype))
+            generator = torch.Generator().manual_seed(seed)
+            noises.append(torch.randn(normalized_images[row_pos].shape, generator=generator, dtype=normalized_images.dtype))
         noise = torch.stack(noises, dim=0).to(device)
-        xt = model.q_sample(x0, t, noise)
-        pred = model.model(xt, t)
-        score = pred.flatten(start_dim=1).pow(2).sum(dim=1).float()
-        acc += score
-        acc_sq += score.pow(2)
-    mean = acc / float(len(seed_bank))
-    var = (acc_sq / float(len(seed_bank)) - mean.pow(2)).clamp_min(0.0)
-    return mean.detach().cpu().numpy().astype(np.float64), torch.sqrt(var).detach().cpu().numpy().astype(np.float64)
+        noisy_images = model.q_sample(normalized_images, timesteps, noise)
+        predicted_noise = model.model(noisy_images, timesteps)
+        score = predicted_noise.flatten(start_dim=1).pow(2).sum(dim=1).float()
+        score_sum += score
+        squared_score_sum += score.pow(2)
+    # Average squared epsilon norms over MC draws and estimate spread from moments.
+    mean = score_sum / float(len(seed_bank))
+    variance = (squared_score_sum / float(len(seed_bank)) - mean.pow(2)).clamp_min(0.0)
+    return mean.detach().cpu().numpy().astype(np.float64), torch.sqrt(variance).detach().cpu().numpy().astype(np.float64)
 
 
 def score_batch_chunked(
@@ -942,11 +969,15 @@ def protocol_dirs(ctx: PipelineContext) -> None:
         "05_filtering/subset_manifests",
         "05_filtering/plots",
         "05_filtering/panels",
+        "05_filtering/p10",
+        "05_filtering/p20",
+        "05_filtering/p30",
         "06_downstream/tdncnn",
         "06_downstream/drunet",
         "07_evaluation/tdncnn",
         "07_evaluation/drunet",
         "07_evaluation/combined",
+        "08_figures",
         "08_external_benchmarks/tdncnn",
         "08_external_benchmarks/drunet",
         "08_external_benchmarks/combined",
@@ -1197,6 +1228,7 @@ def load_ddpm_checkpoint(ctx: PipelineContext, epoch: int, device: torch.device)
 
 
 def stage_score_validate(ctx: PipelineContext) -> None:
+    # Compare candidates using the same validation noise levels.
     stage = "score_validate"
     start = time.time()
     candidate_path = ctx.stage_root(stage) / "candidate_metrics.csv"
@@ -1719,6 +1751,7 @@ def stage_score_select(ctx: PipelineContext) -> None:
     if ctx.dry_run:
         print(f"[dry-run] would select score config into {selected_path}")
         return
+    # Apply coverage and sign gates, then use the fixed order to break ties.
     candidates = pd.read_csv(ctx.stage_root("score_validate") / "candidate_metrics.csv")
     if "scan_phase" in candidates.columns and (candidates["scan_phase"] == "final").any():
         candidates = candidates[candidates["scan_phase"] == "final"].copy()
@@ -1898,7 +1931,7 @@ def stage_filter(ctx: PipelineContext) -> None:
     stage = "filter"
     start = time.time()
     scores_path = ctx.stage_root(stage) / "scores_full.csv"
-    if ctx.resume and ctx.marker_valid(stage, [scores_path, ctx.stage_root(stage) / "subset_indices" / "topk_10_indices.npy"]):
+    if ctx.resume and ctx.marker_valid(stage, [scores_path, ctx.stage_root(stage) / "subset_indices" / "topk_p10_indices.npy"]):
         print(f"[resume] filter already complete: {scores_path}")
         return
     if ctx.dry_run:
@@ -1948,33 +1981,157 @@ def stage_filter(ctx: PipelineContext) -> None:
     score_df.to_csv(scores_path, index=False)
     write_filtering_subsets(ctx, score_df)
     write_filtering_figures(ctx, score_df)
-    ctx.write_marker(stage, start, [scores_path, ctx.stage_root(stage) / "subset_indices" / "topk_10_indices.npy"])
+    ctx.write_marker(stage, start, [scores_path, ctx.stage_root(stage) / "subset_indices" / "topk_p10_indices.npy"])
+
+
+def stage_filter_grid(ctx: PipelineContext) -> None:
+    stage = "filter_grid"
+    start = time.time()
+    root = ctx.stage_root("filter")
+    scores_path = root / "scores_full.csv"
+    required = [
+        scores_path,
+        root / "subset_indices" / "topk_p10_indices.npy",
+        root / "subset_indices" / "quantile_p10_indices.npy",
+        root / "subset_indices" / "random_p10_indices.npy",
+        root / "subset_indices" / "topk_p20_indices.npy",
+        root / "subset_indices" / "quantile_p20_indices.npy",
+        root / "subset_indices" / "random_p20_indices.npy",
+        root / "subset_indices" / "topk_p30_indices.npy",
+        root / "subset_indices" / "quantile_p30_indices.npy",
+        root / "subset_indices" / "random_p30_indices.npy",
+    ]
+    if ctx.resume and ctx.marker_valid(stage, required):
+        print(f"[resume] filter_grid already complete from existing scores: {scores_path}")
+        return
+    if ctx.dry_run:
+        print(f"[dry-run] would build p10/p20/p30 filtering grid from existing {scores_path}")
+        return
+    require_selected(ctx)
+    if not scores_path.exists():
+        raise FileNotFoundError(f"Missing existing full score artifact; refusing to rerun DDPM scoring in filter_grid: {scores_path}")
+    scores = pd.read_csv(scores_path)
+    if scores["original_index"].nunique() != len(scores) or not np.isfinite(scores["score"]).all():
+        raise RuntimeError(f"Invalid scores_full.csv: {scores_path}")
+    if "score_rank" not in scores.columns:
+        scores = scores.sort_values(["score", "original_index"], ascending=[True, True]).reset_index(drop=True)
+        scores["score_rank"] = np.arange(1, len(scores) + 1, dtype=np.int64)
+    write_filtering_subsets(ctx, scores)
+    write_filtering_figures(ctx, scores)
+    ctx.write_marker(stage, start, required)
+
+
+def filtering_fractions(ctx: PipelineContext) -> list[float]:
+    raw = ctx.cfg.get("filtering", {}).get("grid_fractions")
+    if raw is None:
+        raw = [
+            float(ctx.cfg["filtering"].get("topk_ratio", 0.10)),
+            float(ctx.cfg["filtering"].get("quantile_ratio", ctx.cfg["filtering"].get("topk_ratio", 0.10))),
+            float(ctx.cfg["filtering"].get("random_ratio", ctx.cfg["filtering"].get("topk_ratio", 0.10))),
+        ]
+    values = sorted({float(x) for x in raw})
+    if not values:
+        raise ValueError("filtering.grid_fractions must not be empty")
+    return values
+
+
+def fraction_tag(fraction: float) -> str:
+    return f"p{int(round(float(fraction) * 100.0))}"
+
+
+def subset_size_for_fraction(n_full: int, fraction: float) -> int:
+    return max(1, min(int(round(float(fraction) * int(n_full))), int(n_full)))
+
+
+def variant_strategy_fraction(variant: str) -> tuple[str, float]:
+    if variant == "full":
+        return "full", 1.0
+    aliases = {
+        "topk_10": "topk_p10",
+        "quantile_10": "quantile_p10",
+        "random_10": "random_p10",
+    }
+    canonical = aliases.get(variant, variant)
+    if canonical.startswith("topk_p"):
+        return "topk", int(canonical.rsplit("p", 1)[1]) / 100.0
+    if canonical.startswith("quantile_p"):
+        return "quantile", int(canonical.rsplit("p", 1)[1]) / 100.0
+    if canonical.startswith("random_p"):
+        return "random", int(canonical.rsplit("p", 1)[1]) / 100.0
+    raise ValueError(f"Unknown downstream/filtering variant: {variant}")
+
+
+def grid_variants(ctx: PipelineContext) -> list[str]:
+    variants = ["full"]
+    for fraction in filtering_fractions(ctx):
+        tag = fraction_tag(fraction)
+        variants.extend([f"topk_{tag}", f"quantile_{tag}", f"random_{tag}"])
+    return variants
+
+
+def display_variant(variant: str) -> tuple[str, float, str]:
+    strategy, fraction = variant_strategy_fraction(variant)
+    if strategy == "full":
+        return "Full", 1.0, "Full 100%"
+    labels = {"topk": "Top-K", "quantile": "Quantile", "random": "Random"}
+    return labels[strategy], fraction, f"{labels[strategy]} {int(round(fraction * 100.0))}%"
+
+
+def save_subset_array(path: Path, indices: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    indices = np.sort(np.asarray(indices, dtype=np.int64))
+    if path.exists():
+        existing = np.load(path).astype(np.int64)
+        if not np.array_equal(existing, indices):
+            raise FileExistsError(f"Existing subset differs; refusing to overwrite {path}")
+        return
+    np.save(path, indices)
 
 
 def write_filtering_subsets(ctx: PipelineContext, scores: pd.DataFrame) -> None:
-    ratio = float(ctx.cfg["filtering"]["topk_ratio"])
     n_full = len(scores)
-    n_subset = max(1, min(int(round(ratio * n_full)), n_full))
-    topk = scores.sort_values(["score", "original_index"], ascending=[True, True]).head(n_subset)["original_index"].to_numpy(dtype=np.int64)
-    q_input = scores.rename(columns={"score": "score_value"})
-    quantile = select_quantile_spread_exact(
-        q_input,
-        n_subset,
-        seed=int(ctx.cfg["seeds"]["subset_seed"]),
-        min_points_per_bin=int(ctx.cfg["filtering"]["quantile_min_points_per_bin"]),
-    )
-    rng = np.random.default_rng(int(ctx.cfg["seeds"]["subset_seed"]))
-    random = np.sort(rng.choice(np.sort(scores["original_index"].to_numpy(dtype=np.int64)), size=n_subset, replace=False))
-    subsets = {
-        "full": np.sort(scores["original_index"].to_numpy(dtype=np.int64)),
-        "topk_10": np.sort(topk),
-        "quantile_10": np.sort(quantile),
-        "random_10": np.sort(random),
-    }
     root = ctx.stage_root("filter")
+    subsets: dict[str, np.ndarray] = {"full": np.sort(scores["original_index"].to_numpy(dtype=np.int64))}
+    q_input = scores.rename(columns={"score": "score_value"})
+    source = np.sort(scores["original_index"].to_numpy(dtype=np.int64))
+    for fraction in filtering_fractions(ctx):
+        tag = fraction_tag(fraction)
+        n_subset = subset_size_for_fraction(n_full, fraction)
+        topk = scores.sort_values(["score", "original_index"], ascending=[True, True]).head(n_subset)["original_index"].to_numpy(dtype=np.int64)
+        quantile = select_quantile_spread_exact(
+            q_input,
+            n_subset,
+            seed=int(ctx.cfg["seeds"]["subset_seed"]),
+            min_points_per_bin=int(ctx.cfg["filtering"]["quantile_min_points_per_bin"]),
+        )
+        rng = np.random.default_rng(int(ctx.cfg["seeds"]["subset_seed"]))
+        random = rng.choice(source, size=n_subset, replace=False)
+        names = (f"topk_{tag}", f"quantile_{tag}", f"random_{tag}")
+        subsets[names[0]] = np.sort(topk)
+        subsets[names[1]] = np.sort(quantile)
+        subsets[names[2]] = np.sort(random)
     for name, indices in subsets.items():
-        np.save(root / "subset_indices" / f"{name}_indices.npy", indices)
+        strategy, fraction = variant_strategy_fraction(name)
+        expected = n_full if strategy == "full" else subset_size_for_fraction(n_full, fraction)
+        if len(indices) != expected:
+            raise AssertionError(f"{name}: got {len(indices)}, expected {expected}")
+        if len(np.unique(indices)) != len(indices):
+            raise AssertionError(f"{name}: duplicate original indices")
+        path = root / "subset_indices" / f"{name}_indices.npy"
+        save_subset_array(path, indices)
         scores[scores["original_index"].isin(set(indices.tolist()))].to_csv(root / "subset_manifests" / f"{name}_manifest.csv", index=False)
+        if strategy != "full":
+            pct_dir = root / fraction_tag(fraction)
+            pct_dir.mkdir(parents=True, exist_ok=True)
+            save_subset_array(pct_dir / f"{name}_indices.npy", indices)
+            scores[scores["original_index"].isin(set(indices.tolist()))].to_csv(pct_dir / f"{name}_manifest.csv", index=False)
+    legacy_aliases = {"topk_10": "topk_p10", "quantile_10": "quantile_p10", "random_10": "random_p10"}
+    for alias, canonical in legacy_aliases.items():
+        if canonical not in subsets:
+            continue
+        indices = subsets[canonical]
+        save_subset_array(root / "subset_indices" / f"{alias}_indices.npy", indices)
+        scores[scores["original_index"].isin(set(indices.tolist()))].to_csv(root / "subset_manifests" / f"{alias}_manifest.csv", index=False)
     membership = scores[["original_index", "score", "score_rank"]].copy()
     for name, indices in subsets.items():
         membership[f"is_{name}"] = membership["original_index"].isin(set(indices.tolist()))
@@ -2033,8 +2190,8 @@ def write_filtering_subsets(ctx: PipelineContext, scores: pd.DataFrame) -> None:
         )
     pd.DataFrame(class_counts).to_csv(root / "class_counts.csv", index=False)
     class_summary_df = pd.DataFrame(class_summary)
-    topk_cov = float(class_summary_df[class_summary_df["subset"] == "topk_10"]["class_coverage"].iloc[0])
-    random_cov = float(class_summary_df[class_summary_df["subset"] == "random_10"]["class_coverage"].iloc[0])
+    topk_cov = float(class_summary_df[class_summary_df["subset"] == "topk_p10"]["class_coverage"].iloc[0])
+    random_cov = float(class_summary_df[class_summary_df["subset"] == "random_p10"]["class_coverage"].iloc[0])
     class_summary_df["topk_coverage_minus_random_10_coverage"] = topk_cov - random_cov
     class_summary_df.to_csv(root / "class_coverage_summary.csv", index=False)
     if (
@@ -2048,9 +2205,10 @@ def write_filtering_subsets(ctx: PipelineContext, scores: pd.DataFrame) -> None:
         root / "filtering_metadata.json",
         {
             "subset_size_rule": "n_subset = int(round(ratio * n_full)), clamped to [1,n_full], matching CIFAR implementation",
-            "ratio": ratio,
+            "fractions": filtering_fractions(ctx),
             "n_full": n_full,
-            "n_subset": n_subset,
+            "subset_sizes": {name: int(len(indices)) for name, indices in subsets.items()},
+            "subset_sha256": {name: sha256_file(root / "subset_indices" / f"{name}_indices.npy") for name in subsets},
             "topk_rule": "minimum score, original_index tie-breaker",
             "quantile_spread_reference": "src.filtering.selection.select_quantile_spread_exact",
             "random_seed": int(ctx.cfg["seeds"]["subset_seed"]),
@@ -2064,37 +2222,44 @@ def write_filtering_subsets(ctx: PipelineContext, scores: pd.DataFrame) -> None:
 
 def write_filtering_figures(ctx: PipelineContext, scores: pd.DataFrame) -> None:
     root = ctx.stage_root("filter")
-    subsets = {
-        "Top-K": np.load(root / "subset_indices" / "topk_10_indices.npy"),
-        "Quantile": np.load(root / "subset_indices" / "quantile_10_indices.npy"),
-        "Random": np.load(root / "subset_indices" / "random_10_indices.npy"),
-    }
-    metrics = [
-        ("target_psnr_db", "target PSNR"),
-        ("realized_psnr_db_postclip", "realized PSNR"),
-        ("realized_snr_db_postclip", "realized SNR"),
-    ]
-    fig, axes = plt.subplots(3, 3, figsize=(13, 10), constrained_layout=True)
-    for r, (name, indices) in enumerate(subsets.items()):
-        df = scores[scores["original_index"].isin(set(indices.tolist()))]
-        for c, (col, label) in enumerate(metrics):
-            bins = np.histogram_bin_edges(scores[col].to_numpy(dtype=np.float64), bins=30)
-            axes[r, c].hist(scores[col], bins=bins, alpha=0.35, density=True, label="Full")
-            axes[r, c].hist(df[col], bins=bins, alpha=0.5, density=True, label=name)
-            axes[r, c].set_title(f"{name}: {label}")
-            axes[r, c].legend(fontsize=8)
-    fig.savefig(root / "plots" / "quality_shift_3x3.png", dpi=150)
-    plt.close(fig)
-    fig, ax = plt.subplots(figsize=(7, 5), constrained_layout=True)
-    for name, indices in {"Full": scores["original_index"].to_numpy(dtype=np.int64), **subsets}.items():
-        df = scores[scores["original_index"].isin(set(np.asarray(indices).tolist()))]
-        vals = np.sort(df["realized_psnr_db_postclip"].to_numpy(dtype=np.float64))
-        ax.plot(vals, np.arange(1, len(vals) + 1) / len(vals), label=name)
-    ax.set_xlabel("realized PSNR")
-    ax.set_ylabel("ECDF")
-    ax.legend()
-    fig.savefig(root / "plots" / "ecdf_realized_psnr.png", dpi=150)
-    plt.close(fig)
+    clean_for_index, corrupt_for_index = filtering_image_lookup(ctx)
+    for fraction in filtering_fractions(ctx):
+        tag = fraction_tag(fraction)
+        topk_name = f"topk_{tag}"
+        quantile_name = f"quantile_{tag}"
+        random_name = f"random_{tag}"
+        subsets = {
+            "Top-K": np.load(root / "subset_indices" / f"{topk_name}_indices.npy"),
+            "Quantile": np.load(root / "subset_indices" / f"{quantile_name}_indices.npy"),
+            "Random": np.load(root / "subset_indices" / f"{random_name}_indices.npy"),
+        }
+        plot_quality_shift_3x3(
+            scores,
+            {"topk": subsets["Top-K"], "quantile": subsets["Quantile"], "random": subsets["Random"]},
+            root / "plots" / f"quality_shift_{tag}_3x3.png",
+            fraction_label=tag,
+        )
+        plot_ecdf_realized_psnr(scores, subsets, root / "plots" / f"ecdf_realized_psnr_{tag}.png", fraction_label=tag)
+        save_topk_selection_examples(
+            scores,
+            subsets["Top-K"],
+            root / "panels" / f"topk_selection_examples_{tag}.png",
+            clean_for_index=clean_for_index,
+            corrupt_for_index=corrupt_for_index,
+            fraction_label=tag,
+        )
+        save_topk_cleanest_noisiest(
+            scores,
+            subsets["Top-K"],
+            root / "panels" / f"topk_cleanest_noisiest_{tag}.png",
+            clean_for_index=clean_for_index,
+            corrupt_for_index=corrupt_for_index,
+            fraction_label=tag,
+        )
+    if (root / "plots" / "quality_shift_p10_3x3.png").exists():
+        shutil.copyfile(root / "plots" / "quality_shift_p10_3x3.png", root / "plots" / "quality_shift_3x3.png")
+    if (root / "plots" / "ecdf_realized_psnr_p10.png").exists():
+        shutil.copyfile(root / "plots" / "ecdf_realized_psnr_p10.png", root / "plots" / "ecdf_realized_psnr.png")
     write_visual_panel(ctx, scores)
 
 
@@ -2103,11 +2268,27 @@ def tensor_to_pil(x: torch.Tensor, size: int = 96) -> Image.Image:
     return Image.fromarray((arr * 255).round().astype(np.uint8)).resize((size, size))
 
 
-def write_visual_panel(ctx: PipelineContext, scores: pd.DataFrame) -> None:
-    root = ctx.stage_root("filter")
+def filtering_image_lookup(ctx: PipelineContext) -> tuple[Callable[[int], torch.Tensor], Callable[[int], torch.Tensor]]:
     train_ds = build_dataset(ctx.cfg, split="train", smoke=ctx.smoke)
     manifest = pd.read_csv(ctx.stage_root("prepare") / "corpus_manifest.csv")
     corpus = OnDemandCorpusDataset(train_ds, manifest, return_index=True)
+
+    def clean_for_index(original_index: int) -> torch.Tensor:
+        x, _ = train_ds[int(original_index)]
+        return x.to(torch.float32).clamp(0.0, 1.0)
+
+    def corrupt_for_index(original_index: int) -> torch.Tensor:
+        pos = int(np.where(corpus.original_indices == int(original_index))[0][0])
+        x_corrupt, _, _ = corpus[pos]
+        return x_corrupt.to(torch.float32).clamp(0.0, 1.0)
+
+    return clean_for_index, corrupt_for_index
+
+
+def write_visual_panel(ctx: PipelineContext, scores: pd.DataFrame) -> None:
+    root = ctx.stage_root("filter")
+    train_ds = build_dataset(ctx.cfg, split="train", smoke=ctx.smoke)
+    _clean_for_index, corrupt_for_index = filtering_image_lookup(ctx)
     choices = [
         ("lowest score", scores.nsmallest(1, "score").iloc[0]),
         ("highest score", scores.nlargest(1, "score").iloc[0]),
@@ -2120,7 +2301,7 @@ def write_visual_panel(ctx: PipelineContext, scores: pd.DataFrame) -> None:
     for pos, (title, row) in enumerate(choices):
         original = int(row["original_index"])
         clean, _ = train_ds[original]
-        x_corrupt, _, _ = corpus[np.where(corpus.original_indices == original)[0][0]]
+        x_corrupt = corrupt_for_index(original)
         x0 = pos * w
         canvas.paste(tensor_to_pil(clean), (x0 + 10, 30))
         canvas.paste(tensor_to_pil(x_corrupt), (x0 + 112, 30))
@@ -2145,13 +2326,31 @@ VARIANT_STAGE_ALIASES = {
     "downstream_quantile": ("tdncnn", "quantile_10"),
     "downstream_random": ("tdncnn", "random_10"),
     "tdncnn_full": ("tdncnn", "full"),
-    "tdncnn_topk": ("tdncnn", "topk_10"),
-    "tdncnn_quantile": ("tdncnn", "quantile_10"),
-    "tdncnn_random": ("tdncnn", "random_10"),
+    "tdncnn_topk": ("tdncnn", "topk_p10"),
+    "tdncnn_quantile": ("tdncnn", "quantile_p10"),
+    "tdncnn_random": ("tdncnn", "random_p10"),
+    "tdncnn_topk_p10": ("tdncnn", "topk_p10"),
+    "tdncnn_quantile_p10": ("tdncnn", "quantile_p10"),
+    "tdncnn_random_p10": ("tdncnn", "random_p10"),
+    "tdncnn_topk_p20": ("tdncnn", "topk_p20"),
+    "tdncnn_topk_p30": ("tdncnn", "topk_p30"),
+    "tdncnn_quantile_p20": ("tdncnn", "quantile_p20"),
+    "tdncnn_quantile_p30": ("tdncnn", "quantile_p30"),
+    "tdncnn_random_p20": ("tdncnn", "random_p20"),
+    "tdncnn_random_p30": ("tdncnn", "random_p30"),
     "drunet_full": ("drunet", "full"),
-    "drunet_topk": ("drunet", "topk_10"),
-    "drunet_quantile": ("drunet", "quantile_10"),
-    "drunet_random": ("drunet", "random_10"),
+    "drunet_topk": ("drunet", "topk_p10"),
+    "drunet_quantile": ("drunet", "quantile_p10"),
+    "drunet_random": ("drunet", "random_p10"),
+    "drunet_topk_p10": ("drunet", "topk_p10"),
+    "drunet_quantile_p10": ("drunet", "quantile_p10"),
+    "drunet_random_p10": ("drunet", "random_p10"),
+    "drunet_topk_p20": ("drunet", "topk_p20"),
+    "drunet_topk_p30": ("drunet", "topk_p30"),
+    "drunet_quantile_p20": ("drunet", "quantile_p20"),
+    "drunet_quantile_p30": ("drunet", "quantile_p30"),
+    "drunet_random_p20": ("drunet", "random_p20"),
+    "drunet_random_p30": ("drunet", "random_p30"),
 }
 
 
@@ -2178,6 +2377,20 @@ def downstream_model_cfg(ctx: PipelineContext, model_name: str) -> dict[str, Any
         merged.update(dict(ctx.cfg.get("drunet", {})))
         return merged
     return dict(ctx.cfg["downstream"])
+
+
+def downstream_num_workers(ctx: PipelineContext, model_name: str, phase: str) -> int:
+    if ctx.smoke:
+        return 0
+    model_cfg = downstream_model_cfg(ctx, model_name)
+    value = model_cfg.get(f"{phase}_num_workers", model_cfg.get("num_workers", ctx.cfg["runtime"]["num_workers"]))
+    return max(0, int(value))
+
+
+def downstream_validation_batch_size(ctx: PipelineContext, model_name: str, train_batch_size: int) -> int:
+    model_cfg = downstream_model_cfg(ctx, model_name)
+    key = "validation_batch_size_smoke" if ctx.smoke else "validation_batch_size"
+    return max(1, int(model_cfg.get(key, train_batch_size)))
 
 
 def build_downstream_model(ctx: PipelineContext, model_name: str, device: torch.device) -> nn.Module:
@@ -2222,6 +2435,80 @@ def load_downstream_state(model: nn.Module, checkpoint: Path, device: torch.devi
     model.load_state_dict(state_dict, strict=True)
 
 
+def downstream_training_protocol(ctx: PipelineContext, model_name: str, variant: str) -> dict[str, Any]:
+    model_cfg = downstream_model_cfg(ctx, model_name)
+    early_cfg = dict(model_cfg.get("early_stopping", {}))
+    subset_path = ctx.stage_root("filter") / "subset_indices" / f"{variant}_indices.npy"
+    init_path = ctx.experiment_root / "06_downstream" / model_name / "initial_state.pt"
+    return {
+        "protocol_version": "imagenet100_downstream_v2_common_task_noise",
+        "dataset": {
+            "name": str(ctx.cfg["dataset"]["name"]),
+            "channels": int(ctx.cfg["dataset"]["channels"]),
+            "image_size": int(ctx.cfg["dataset"]["image_size"]),
+        },
+        "model": model_name,
+        "variant": variant,
+        "subset_indices_sha256": sha256_file(subset_path) if subset_path.exists() else None,
+        "initial_state_sha256": sha256_file(init_path) if init_path.exists() else None,
+        "task_noise": dict(ctx.cfg["downstream"]["task_noise"]),
+        "task_noise_seed_contract": "stable_int_seed(dataset, downstream_task_noise, original_index, task_noise_seed, version)",
+        "max_steps": int(model_cfg["max_steps_smoke" if ctx.smoke else "max_steps"]),
+        "batch_size": int(model_cfg["batch_size_smoke" if ctx.smoke else "batch_size"]),
+        "lr": float(model_cfg["lr"]),
+        "weight_decay": float(model_cfg.get("weight_decay", 0.0)),
+        "validation_interval_steps": int(
+            model_cfg.get("validation_interval_steps_smoke" if ctx.smoke else "validation_interval_steps", 500)
+        ),
+        "early_stopping": {
+            "enabled": bool(early_cfg.get("enabled", False)),
+            "monitor": str(early_cfg.get("monitor", "")),
+            "mode": str(early_cfg.get("mode", "")),
+            "patience": int(early_cfg.get("patience_smoke" if ctx.smoke else "patience", early_cfg.get("patience", 0))),
+            "min_delta": float(early_cfg.get("min_delta", 1e-4)),
+            "warmup_steps": int(
+                early_cfg.get("warmup_steps_smoke" if ctx.smoke else "warmup_steps", early_cfg.get("warmup_steps", 0))
+            ),
+        },
+    }
+
+
+def downstream_training_protocol_hash(ctx: PipelineContext, model_name: str, variant: str) -> str:
+    return config_hash(downstream_training_protocol(ctx, model_name, variant))
+
+
+def downstream_best_matches_history(root: Path) -> bool:
+    history_path = root / "training_history.csv"
+    best_path = root / "best.pt"
+    if not history_path.exists() or not best_path.exists():
+        return False
+    try:
+        history = pd.read_csv(history_path)
+    except Exception:
+        return False
+    if "val_loss" not in history.columns or "step" not in history.columns:
+        return False
+    val = pd.to_numeric(history["val_loss"], errors="coerce")
+    finite = history[np.isfinite(val)].copy()
+    if finite.empty:
+        return False
+    finite["_val_loss_numeric"] = pd.to_numeric(finite["val_loss"], errors="coerce")
+    best_row = finite.loc[finite["_val_loss_numeric"].idxmin()]
+    best_loss = float(best_row["_val_loss_numeric"])
+    best_step = int(best_row["step"])
+    try:
+        payload = torch.load(best_path, map_location="cpu")
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    ckpt_loss = payload.get("best_val_loss")
+    ckpt_step = payload.get("step")
+    if ckpt_loss is None or ckpt_step is None:
+        return False
+    return int(ckpt_step) == best_step and math.isclose(float(ckpt_loss), best_loss, rel_tol=1e-8, abs_tol=1e-10)
+
+
 @torch.no_grad()
 def downstream_validation_loss(
     ctx: PipelineContext,
@@ -2248,7 +2535,12 @@ def downstream_validation_loss(
     if ctx.real_smoke:
         indices = indices[: min(int(ctx.cfg["real_smoke"]["evaluation_images"]), len(indices))]
     dataset = DownstreamValidationDataset(val_ds, indices, ctx.cfg, split="downstream_validation")
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0 if ctx.smoke else int(ctx.cfg["runtime"]["num_workers"]))
+    loader = DataLoader(
+        dataset,
+        batch_size=downstream_validation_batch_size(ctx, model_name, batch_size),
+        shuffle=False,
+        num_workers=downstream_num_workers(ctx, model_name, "validation"),
+    )
     criterion = nn.MSELoss(reduction="sum")
     model.eval()
     total = 0.0
@@ -2264,13 +2556,65 @@ def downstream_validation_loss(
     return total / max(count, 1)
 
 
+def downstream_artifacts_complete(ctx: PipelineContext, stage: str, model_name: str, variant: str) -> bool:
+    root = ctx.stage_root(stage)
+    best = root / "best.pt"
+    history = root / "training_history.csv"
+    meta_path = root / "run_meta.json"
+    last = root / "last.pt"
+    if not (best.exists() and history.exists() and meta_path.exists() and last.exists()):
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if str(meta.get("model")) != model_name or str(meta.get("variant")) != variant:
+        return False
+    if bool(meta.get("early_stopping_enabled", False)) is not True:
+        return False
+    if str(meta.get("early_stopping_monitor", "val_loss")) != "val_loss":
+        return False
+    if str(meta.get("early_stopping_mode", "min")) != "min":
+        return False
+    model_cfg = downstream_model_cfg(ctx, model_name)
+    early_cfg = dict(model_cfg.get("early_stopping", {}))
+    if int(meta.get("max_optimizer_steps", -1)) != int(model_cfg["max_steps_smoke" if ctx.smoke else "max_steps"]):
+        return False
+    if int(meta.get("validation_interval_steps", -1)) != int(
+        model_cfg.get("validation_interval_steps_smoke" if ctx.smoke else "validation_interval_steps", 500)
+    ):
+        return False
+    if int(meta.get("early_stopping_patience", -1)) != int(
+        early_cfg.get("patience_smoke" if ctx.smoke else "patience", early_cfg.get("patience", 10))
+    ):
+        return False
+    if not math.isclose(float(meta.get("early_stopping_min_delta", float("nan"))), float(early_cfg.get("min_delta", 1e-4)), rel_tol=0.0, abs_tol=1e-12):
+        return False
+    if int(meta.get("early_stopping_warmup_steps", -1)) != int(
+        early_cfg.get("warmup_steps_smoke" if ctx.smoke else "warmup_steps", early_cfg.get("warmup_steps", 0))
+    ):
+        return False
+    expected_protocol_hash = downstream_training_protocol_hash(ctx, model_name, variant)
+    if str(meta.get("training_protocol_hash", "")) != expected_protocol_hash:
+        return False
+    try:
+        payload = torch.load(best, map_location="cpu")
+    except Exception:
+        return False
+    if not isinstance(payload, dict) or str(payload.get("training_protocol_hash", "")) != expected_protocol_hash:
+        return False
+    if not downstream_best_matches_history(root):
+        return False
+    return True
+
+
 def stage_downstream(ctx: PipelineContext, stage: str) -> None:
     start = time.time()
     model_name = downstream_model_name(stage)
     variant = downstream_variant_name(stage)
     ckpt = ctx.stage_root(stage) / "best.pt"
-    if ctx.resume and ctx.marker_valid(stage, [ckpt]):
-        print(f"[resume] {stage} already complete: {ckpt}")
+    if ctx.resume and downstream_artifacts_complete(ctx, stage, model_name, variant):
+        print(f"[resume] {stage} compatible downstream artifacts found: {ckpt}")
         return
     if ctx.dry_run:
         print(f"[dry-run] would train downstream {model_name} {variant} into {ctx.stage_root(stage)}")
@@ -2288,7 +2632,7 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
         train_data,
         batch_size=int(model_cfg["batch_size_smoke" if ctx.smoke else "batch_size"]),
         shuffle=True,
-        num_workers=0 if ctx.smoke else int(ctx.cfg["runtime"]["num_workers"]),
+        num_workers=downstream_num_workers(ctx, model_name, "train"),
         generator=torch.Generator().manual_seed(int(ctx.cfg["seeds"]["model_seed"])),
     )
     device = torch.device("cuda" if torch.cuda.is_available() and not ctx.smoke else "cpu")
@@ -2299,6 +2643,8 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
         init_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), init_path)
     load_downstream_state(model, init_path, device)
+    training_protocol = downstream_training_protocol(ctx, model_name, variant)
+    training_protocol_hash = config_hash(training_protocol)
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=float(model_cfg["lr"]),
@@ -2316,6 +2662,7 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
     iterator = cycle_loader(loader)
     rows = []
     best_val_loss = float("inf")
+    patience_best = float("inf")
     best_step = 0
     checks_without_improvement = 0
     stop_reason = "max_steps"
@@ -2331,6 +2678,9 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
         subset_size=int(len(indices)),
         max_steps=int(max_steps),
         batch_size=int(batch_size),
+        train_num_workers=int(downstream_num_workers(ctx, model_name, "train")),
+        validation_batch_size=int(downstream_validation_batch_size(ctx, model_name, batch_size)),
+        validation_num_workers=int(downstream_num_workers(ctx, model_name, "validation")),
         early_stopping_enabled=True,
         early_stopping_monitor="val_loss",
         early_stopping_patience=int(patience),
@@ -2353,11 +2703,24 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
         val_loss = float("nan")
         if step == 1 or step == max_steps or step % val_interval == 0:
             val_loss = downstream_validation_loss(ctx, model_name, model, device, batch_size=batch_size)
-            if step >= warmup_steps and val_loss < best_val_loss - min_delta:
+            # Save every validation minimum, including improvements below min_delta.
+            if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_step = int(step)
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "step": step,
+                        "variant": variant,
+                        "best_val_loss": best_val_loss,
+                        "training_protocol_hash": training_protocol_hash,
+                    },
+                    ckpt,
+                )
+            # Warmup/min_delta affect stopping patience, not which checkpoint is best.
+            if step >= warmup_steps and val_loss < patience_best - min_delta:
+                patience_best = val_loss
                 checks_without_improvement = 0
-                torch.save(model.state_dict(), ckpt)
             elif step >= warmup_steps:
                 checks_without_improvement += 1
                 if checks_without_improvement >= patience:
@@ -2412,16 +2775,30 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
         if stop_reason == "early_stopping":
             break
     if not ckpt.exists():
-        torch.save(model.state_dict(), ckpt)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "step": step,
+                "variant": variant,
+                "best_val_loss": best_val_loss,
+                "training_protocol_hash": training_protocol_hash,
+            },
+            ckpt,
+        )
     pd.DataFrame(rows).to_csv(history_path, index=False)
     torch.save({"model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "step": step}, ctx.stage_root(stage) / "last.pt")
+    finite_val = pd.DataFrame(rows)["val_loss"].dropna()
+    final_val_loss = float(finite_val.iloc[-1]) if len(finite_val) else float("nan")
+    train_time_seconds = float(time.time() - start)
     write_json(
         ctx.stage_root(stage) / "run_meta.json",
         {
             "model": model_name,
             "variant": variant,
             "subset_size": int(len(indices)),
+            "max_optimizer_steps": int(max_steps),
             "optimizer_steps": int(step),
+            "stopped_step": int(step),
             "initial_state": str(init_path),
             "initial_state_sha256": sha256_file(init_path),
             "sample_exposures": int(step * int(model_cfg["batch_size_smoke" if ctx.smoke else "batch_size"])),
@@ -2435,7 +2812,21 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
             "validation_interval_steps": int(val_interval),
             "best_step": int(best_step),
             "best_val_loss": float(best_val_loss),
+            "final_val_loss": final_val_loss,
             "stop_reason": stop_reason,
+            "effective_epochs_at_best": float(best_step * batch_size / max(1, len(indices))),
+            "effective_epochs_at_stop": float(step * batch_size / max(1, len(indices))),
+            "total_seen_samples_at_best": int(best_step * batch_size),
+            "train_time_seconds": train_time_seconds,
+            "optimizer": "Adam",
+            "lr": float(model_cfg["lr"]),
+            "scheduler": "none",
+            "batch_size": int(batch_size),
+            "train_num_workers": int(downstream_num_workers(ctx, model_name, "train")),
+            "validation_batch_size": int(downstream_validation_batch_size(ctx, model_name, batch_size)),
+            "validation_num_workers": int(downstream_num_workers(ctx, model_name, "validation")),
+            "training_protocol": training_protocol,
+            "training_protocol_hash": training_protocol_hash,
         },
     )
     downstream_log(
@@ -2449,7 +2840,7 @@ def stage_downstream(ctx: PipelineContext, stage: str) -> None:
         best_step=int(best_step),
         best_val_loss=float(best_val_loss),
         stop_reason=stop_reason,
-        elapsed_sec=round(time.time() - start, 3),
+        elapsed_sec=round(train_time_seconds, 3),
         best_checkpoint=str(ckpt),
         training_history=str(history_path),
     )
@@ -2469,6 +2860,7 @@ def create_eval_cache(ctx: PipelineContext) -> tuple[Path, Path, Path]:
     indices = np.load(indices_path).astype(np.int64) if indices_path.exists() else np.arange(min(16, len(val_ds)), dtype=np.int64)
     if ctx.real_smoke:
         indices = indices[: min(int(ctx.cfg["real_smoke"]["evaluation_images"]), len(indices))]
+    # Save one noisy input per image and use it for all models and subsets.
     inputs = []
     targets = []
     rows = []
@@ -2524,12 +2916,205 @@ def eval_metrics(pred: torch.Tensor, target: torch.Tensor, lpips_model) -> tuple
 
 def model_variant_stages(model_name: str) -> list[tuple[str, str, str]]:
     prefix = "tdncnn" if model_name == "tdncnn" else "drunet"
-    return [
+    stages = [
         ("Full", "full", f"{prefix}_full"),
-        ("Top-K 10%", "topk_10", f"{prefix}_topk"),
-        ("Quantile 10%", "quantile_10", f"{prefix}_quantile"),
-        ("Random 10%", "random_10", f"{prefix}_random"),
+        ("Top-K 10%", "topk_p10", f"{prefix}_topk"),
+        ("Top-K 20%", "topk_p20", f"{prefix}_topk_p20"),
+        ("Top-K 30%", "topk_p30", f"{prefix}_topk_p30"),
+        ("Quantile 10%", "quantile_p10", f"{prefix}_quantile"),
+        ("Quantile 20%", "quantile_p20", f"{prefix}_quantile_p20"),
+        ("Quantile 30%", "quantile_p30", f"{prefix}_quantile_p30"),
+        ("Random 10%", "random_p10", f"{prefix}_random"),
+        ("Random 20%", "random_p20", f"{prefix}_random_p20"),
+        ("Random 30%", "random_p30", f"{prefix}_random_p30"),
     ]
+    return stages
+
+
+def variant_table_fields(label: str, variant: str) -> tuple[str, float]:
+    strategy, fraction, _display = display_variant(variant)
+    return strategy, fraction
+
+
+def grid_downstream_stages(model_name: str) -> list[str]:
+    prefix = "tdncnn" if model_name == "tdncnn" else "drunet"
+    return [
+        f"{prefix}_full",
+        f"{prefix}_topk",
+        f"{prefix}_topk_p20",
+        f"{prefix}_topk_p30",
+        f"{prefix}_quantile",
+        f"{prefix}_quantile_p20",
+        f"{prefix}_quantile_p30",
+        f"{prefix}_random",
+        f"{prefix}_random_p20",
+        f"{prefix}_random_p30",
+    ]
+
+
+def stage_downstream_grid(ctx: PipelineContext, model_name: str) -> None:
+    stage = f"{model_name}_grid"
+    start = time.time()
+    branch_stages = grid_downstream_stages(model_name)
+    required = [ctx.stage_root(item) / "best.pt" for item in branch_stages]
+    branch_specs = [(item, downstream_model_name(item), downstream_variant_name(item)) for item in branch_stages]
+    if ctx.resume and ctx.marker_valid(stage, required) and all(
+        downstream_artifacts_complete(ctx, item, branch_model, branch_variant)
+        for item, branch_model, branch_variant in branch_specs
+    ):
+        print(f"[resume] {stage} already complete")
+        return
+    if ctx.dry_run:
+        print(f"[dry-run] would run {stage}: {', '.join(branch_stages)}")
+        return
+    for item in branch_stages:
+        stage_downstream(ctx, item)
+    ctx.write_marker(stage, start, required)
+
+
+def stage_downstream_early_stopping_audit(ctx: PipelineContext) -> None:
+    stage = "downstream_early_stopping_audit"
+    if ctx.dry_run:
+        print("[dry-run] would audit downstream early-stopping protocol")
+        return
+    start = time.time()
+    out_dir = ctx.stage_root(stage)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    md_path = out_dir / "downstream_early_stopping_audit.md"
+    root_copy = ctx.experiment_root / "00_protocol" / "downstream_early_stopping_audit.md"
+    rows: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for model_name, architecture in [("tdncnn", "TDnCNN"), ("drunet", "DRUNet")]:
+        model_cfg = downstream_model_cfg(ctx, model_name)
+        early_cfg = dict(model_cfg.get("early_stopping", {}))
+        enabled = bool(early_cfg.get("enabled", False))
+        monitor = str(early_cfg.get("monitor", ""))
+        mode = str(early_cfg.get("mode", ""))
+        patience = int(early_cfg.get("patience_smoke" if ctx.smoke else "patience", early_cfg.get("patience", 0)))
+        max_steps = int(model_cfg["max_steps_smoke" if ctx.smoke else "max_steps"])
+        val_interval = int(model_cfg.get("validation_interval_steps_smoke" if ctx.smoke else "validation_interval_steps", 0))
+        warmup_steps = int(early_cfg.get("warmup_steps_smoke" if ctx.smoke else "warmup_steps", early_cfg.get("warmup_steps", 0)))
+        min_delta = float(early_cfg.get("min_delta", -1.0))
+        for _label, variant, _stage_name in model_variant_stages(model_name):
+            if not enabled:
+                failures.append(f"{architecture} {variant}: early_stopping.enabled is not true")
+            if monitor != "val_loss":
+                failures.append(f"{architecture} {variant}: monitor is {monitor!r}, expected 'val_loss'")
+            if mode != "min":
+                failures.append(f"{architecture} {variant}: mode is {mode!r}, expected 'min'")
+            rows.append(
+                {
+                    "Architecture": architecture,
+                    "Variant": variant,
+                    "Early stopping": "ON" if enabled else "OFF",
+                    "Monitor": monitor,
+                    "Mode": mode,
+                    "Patience": patience,
+                    "Min delta": min_delta,
+                    "Warmup steps": warmup_steps,
+                    "Validation frequency": val_interval,
+                    "Max steps": max_steps,
+                    "Evaluated checkpoint": "best.pt",
+                }
+            )
+    if failures:
+        raise RuntimeError("Downstream early-stopping audit failed:\n" + "\n".join(failures))
+    audit = pd.DataFrame(rows)
+    audit.to_csv(out_dir / "downstream_early_stopping_audit.csv", index=False)
+    headers = [
+        "Architecture",
+        "Variant",
+        "Early stopping",
+        "Monitor",
+        "Mode",
+        "Patience",
+        "Min delta",
+        "Warmup steps",
+        "Validation frequency",
+        "Max steps",
+        "Evaluated checkpoint",
+    ]
+    lines = [
+        "# Downstream Early Stopping Audit",
+        "",
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---", "---", "---", "---", "---", "---:", "---:", "---:", "---:", "---:", "---"]) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(str(row[key]) for key in headers) + " |")
+    lines.extend(
+        [
+            "",
+            "All main ImageNet downstream branches use validation-controlled training.",
+            "Internal and external evaluation stages load `best.pt`.",
+        ]
+    )
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    shutil.copyfile(md_path, root_copy)
+    ctx.write_marker(stage, start, [md_path, root_copy, out_dir / "downstream_early_stopping_audit.csv"])
+
+
+def stage_evaluate_grid(ctx: PipelineContext) -> None:
+    stage = "evaluate_grid"
+    start = time.time()
+    combined = ctx.experiment_root / "07_evaluation" / "combined" / "subset_grid_results_all.csv"
+    if (
+        ctx.resume
+        and ctx.marker_valid(stage, [combined])
+        and evaluation_artifacts_complete(ctx, "tdncnn")
+        and evaluation_artifacts_complete(ctx, "drunet")
+    ):
+        print(f"[resume] evaluate_grid already complete: {combined}")
+        return
+    if ctx.dry_run:
+        print("[dry-run] would evaluate TDnCNN and DRUNet grid best.pt checkpoints")
+        return
+    stage_evaluate_model(ctx, "tdncnn")
+    stage_evaluate_model(ctx, "drunet")
+    if not combined.exists():
+        write_combined_internal_if_ready(ctx)
+    ctx.write_marker(stage, start, [combined])
+
+
+def evaluation_protocol(ctx: PipelineContext, model_name: str) -> dict[str, Any]:
+    checkpoints = {}
+    for _label, variant, dstage in model_variant_stages(model_name):
+        path = ctx.stage_root(dstage) / "best.pt"
+        checkpoints[variant] = sha256_file(path) if path.exists() else None
+    cache_meta_path = ctx.experiment_root / "07_evaluation" / "combined" / "eval_noise_cache_meta.json"
+    cache_meta = json.loads(cache_meta_path.read_text(encoding="utf-8")) if cache_meta_path.exists() else {}
+    return {
+        "protocol_version": "imagenet100_eval_v1_best_checkpoints",
+        "model": model_name,
+        "evaluation": dict(ctx.cfg["evaluation"]),
+        "best_checkpoint_sha256": checkpoints,
+        "eval_cache": cache_meta,
+    }
+
+
+def evaluation_protocol_hash(ctx: PipelineContext, model_name: str) -> str:
+    return config_hash(evaluation_protocol(ctx, model_name))
+
+
+def evaluation_artifacts_complete(ctx: PipelineContext, model_name: str) -> bool:
+    stage = f"{model_name}_evaluate"
+    root = ctx.stage_root(stage)
+    summary = root / "summary_table.csv"
+    per_image = root / "per_image_metrics.csv"
+    meta_path = root / "evaluation_meta.json"
+    grid_path = ctx.experiment_root / "07_evaluation" / f"subset_grid_results_{model_name}.csv"
+    if not (summary.exists() and per_image.exists() and meta_path.exists() and grid_path.exists()):
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if str(meta.get("evaluation_protocol_hash", "")) != evaluation_protocol_hash(ctx, model_name):
+        return False
+    return all(
+        downstream_artifacts_complete(ctx, dstage, model_name, variant)
+        for _label, variant, dstage in model_variant_stages(model_name)
+    )
 
 
 def write_combined_internal_if_ready(ctx: PipelineContext) -> None:
@@ -2541,6 +3126,10 @@ def write_combined_internal_if_ready(ctx: PipelineContext) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
     combined = pd.concat([pd.read_csv(tdn), pd.read_csv(dru)], ignore_index=True)
     combined.to_csv(out_root / "internal_combined_table.csv", index=False)
+    grid_paths = [ctx.experiment_root / "07_evaluation" / "subset_grid_results_tdncnn.csv", ctx.experiment_root / "07_evaluation" / "subset_grid_results_drunet.csv"]
+    if all(path.exists() for path in grid_paths):
+        grid = pd.concat([pd.read_csv(path) for path in grid_paths], ignore_index=True)
+        grid.to_csv(out_root / "subset_grid_results_all.csv", index=False)
     for model_name in ["tdncnn", "drunet"]:
         src = ctx.stage_root(f"{model_name}_evaluate") / "summary_table.csv"
         shutil.copyfile(src, out_root / f"{model_name}_internal_results.csv")
@@ -2549,8 +3138,10 @@ def write_combined_internal_if_ready(ctx: PipelineContext) -> None:
 def stage_evaluate_model(ctx: PipelineContext, model_name: str) -> None:
     stage = f"{model_name}_evaluate"
     start = time.time()
+    ctx.stage_root(stage).mkdir(parents=True, exist_ok=True)
+    (ctx.experiment_root / "07_evaluation").mkdir(parents=True, exist_ok=True)
     summary = ctx.stage_root(stage) / "summary_table.csv"
-    if ctx.resume and ctx.marker_valid(stage, [summary]):
+    if ctx.resume and ctx.marker_valid(stage, [summary]) and evaluation_artifacts_complete(ctx, model_name):
         print(f"[resume] {stage} already complete: {summary}")
         return
     if ctx.dry_run:
@@ -2577,9 +3168,11 @@ def stage_evaluate_model(ctx: PipelineContext, model_name: str) -> None:
                 for i in range(len(mse)):
                     rows.append(
                         {
-                            "Model": model_name,
+                            "Architecture": model_name,
                             "Variant": label,
                             "variant_key": variant,
+                            "Strategy": variant_table_fields(label, variant)[0],
+                            "Fraction": variant_table_fields(label, variant)[1],
                             "sample_index": offset + i,
                             "MSE": float(mse[i]),
                             "PSNR": float(psnr[i]),
@@ -2590,23 +3183,218 @@ def stage_evaluate_model(ctx: PipelineContext, model_name: str) -> None:
                 offset += len(mse)
     per_image = pd.DataFrame(rows)
     per_image.to_csv(ctx.stage_root(stage) / "per_image_metrics.csv", index=False)
-    agg = per_image.groupby("Variant")[["PSNR", "SSIM", "LPIPS", "MSE"]].agg(["mean", "std", "median"]).reset_index()
-    flat_cols = ["Variant"] + [f"{a}_{b}" for a, b in agg.columns.tolist()[1:]]
+    agg = per_image.groupby(["Architecture", "Strategy", "Fraction", "Variant", "variant_key"])[["PSNR", "SSIM", "LPIPS", "MSE"]].agg(["mean", "std", "median"]).reset_index()
+    flat_cols = ["Architecture", "Strategy", "Fraction", "Variant", "variant_key"] + [f"{a}_{b}" for a, b in agg.columns.tolist()[5:]]
     agg.columns = flat_cols
     full_psnr = float(agg[agg["Variant"] == "Full"]["PSNR_mean"].iloc[0])
-    agg.insert(0, "Model", model_name)
     train_sizes = {}
-    opt_steps = {}
+    best_steps = {}
+    effective_epochs = {}
     for label, _variant, dstage in model_variant_stages(model_name):
         meta = json.loads((ctx.stage_root(dstage) / "run_meta.json").read_text(encoding="utf-8"))
         train_sizes[label] = int(meta["subset_size"])
-        opt_steps[label] = int(meta["optimizer_steps"])
+        best_steps[label] = int(meta.get("best_step", meta.get("optimizer_steps", 0)))
+        effective_epochs[label] = float(meta.get("effective_epochs_at_best", 0.0))
     agg["Train size"] = agg["Variant"].map(train_sizes).astype(int)
-    agg["Optimizer steps"] = agg["Variant"].map(opt_steps).astype(int)
+    agg["Best step"] = agg["Variant"].map(best_steps).astype(int)
+    agg["Effective epochs"] = agg["Variant"].map(effective_epochs).astype(float)
     agg["Delta PSNR vs model Full"] = agg["PSNR_mean"] - full_psnr
+    grid = agg[
+        [
+            "Architecture",
+            "Strategy",
+            "Fraction",
+            "Train size",
+            "Best step",
+            "Effective epochs",
+            "PSNR_mean",
+            "SSIM_mean",
+            "LPIPS_mean",
+            "MSE_mean",
+            "Delta PSNR vs model Full",
+            "Variant",
+            "variant_key",
+        ]
+    ].rename(
+        columns={
+            "PSNR_mean": "PSNR",
+            "SSIM_mean": "SSIM",
+            "LPIPS_mean": "LPIPS",
+            "MSE_mean": "MSE",
+            "Delta PSNR vs model Full": "Delta PSNR vs Full",
+        }
+    )
     agg.to_csv(summary, index=False)
+    grid_name = f"subset_grid_results_{model_name}.csv"
+    grid.to_csv(ctx.experiment_root / "07_evaluation" / grid_name, index=False)
+    grid.to_csv(ctx.stage_root(stage) / grid_name, index=False)
+    write_json(
+        ctx.stage_root(stage) / "evaluation_meta.json",
+        {
+            "model": model_name,
+            "evaluation_protocol": evaluation_protocol(ctx, model_name),
+            "evaluation_protocol_hash": evaluation_protocol_hash(ctx, model_name),
+        },
+    )
     write_combined_internal_if_ready(ctx)
-    ctx.write_marker(stage, start, [summary, ctx.stage_root(stage) / "per_image_metrics.csv"])
+    ctx.write_marker(stage, start, [summary, ctx.stage_root(stage) / "per_image_metrics.csv", ctx.stage_root(stage) / "evaluation_meta.json"])
+
+
+def downstream_stage_for_variant(model_name: str, variant: str) -> str:
+    prefix = "tdncnn" if model_name == "tdncnn" else "drunet"
+    mapping = {
+        "full": f"{prefix}_full",
+        "topk_10": f"{prefix}_topk",
+        "quantile_10": f"{prefix}_quantile",
+        "random_10": f"{prefix}_random",
+        "topk_p10": f"{prefix}_topk",
+        "quantile_p10": f"{prefix}_quantile",
+        "random_p10": f"{prefix}_random",
+    }
+    if variant in mapping:
+        return mapping[variant]
+    strategy, fraction = variant_strategy_fraction(variant)
+    tag = fraction_tag(fraction)
+    if strategy == "topk":
+        return f"{prefix}_topk_{tag}"
+    if strategy == "quantile":
+        return f"{prefix}_quantile_{tag}"
+    if strategy == "random":
+        return f"{prefix}_random_{tag}"
+    raise ValueError(f"No downstream stage for {model_name} {variant}")
+
+
+@torch.no_grad()
+def predict_downstream_variant(ctx: PipelineContext, model_name: str, variant: str, x: torch.Tensor, device: torch.device) -> torch.Tensor:
+    stage = downstream_stage_for_variant(model_name, variant)
+    model = build_downstream_model(ctx, model_name, device)
+    load_downstream_state(model, ctx.stage_root(stage) / "best.pt", device)
+    model.eval()
+    x_in = x.unsqueeze(0).to(device)
+    fixed_sigma = float(ctx.cfg["evaluation"]["eval_noise"]["sigma"])
+    sigma = torch.full((1,), fixed_sigma, dtype=x_in.dtype, device=device)
+    pred = downstream_forward(model_name, model, x_in, sigma)
+    return pred.squeeze(0).cpu().clamp(0.0, 1.0)
+
+
+def metric_for_sample(per: pd.DataFrame, variant: str, sample_index: int) -> dict[str, float]:
+    row = per[(per["variant_key"] == variant) & (per["sample_index"] == int(sample_index))]
+    if row.empty:
+        return {}
+    item = row.iloc[0]
+    return {"psnr": float(item["PSNR"]), "ssim": float(item["SSIM"]), "lpips": float(item["LPIPS"]), "mse": float(item["MSE"])}
+
+
+def stage_figures_grid(ctx: PipelineContext) -> None:
+    stage = "figures_grid"
+    start = time.time()
+    out = ctx.stage_root(stage)
+    required = [out / "subset_fraction_vs_psnr_tdncnn.png", out / "subset_fraction_vs_psnr_drunet.png"]
+    meta_path = out / "figures_meta.json"
+    if ctx.resume and ctx.marker_valid(stage, required + [meta_path]) and figures_artifacts_complete(ctx):
+        print(f"[resume] figures_grid already complete: {out}")
+        return
+    if ctx.dry_run:
+        print(f"[dry-run] would write grid figures to {out}")
+        return
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for model_name in ["tdncnn", "drunet"]:
+        grid_path = ctx.experiment_root / "07_evaluation" / f"subset_grid_results_{model_name}.csv"
+        if not grid_path.exists():
+            raise FileNotFoundError(f"Missing grid evaluation table: {grid_path}")
+        results = pd.read_csv(grid_path).rename(columns={"Architecture": "model", "Strategy": "strategy", "Fraction": "fraction"})
+        results["strategy"] = results["strategy"].astype(str).str.lower().str.replace("-", "", regex=False)
+        for metric, suffix in [("PSNR", "psnr"), ("SSIM", "ssim"), ("LPIPS", "lpips"), ("MSE", "mse")]:
+            metric_path = out / f"subset_fraction_vs_{suffix}_{model_name}.png"
+            plot_subset_fraction_metric(results, metric, metric_path)
+            written.append(metric_path)
+
+        per = pd.read_csv(ctx.stage_root(f"{model_name}_evaluate") / "per_image_metrics.csv")
+        input_path, target_path, _manifest_path = create_eval_cache(ctx)
+        inputs = torch.load(input_path, map_location="cpu").to(torch.float32)
+        targets = torch.load(target_path, map_location="cpu").to(torch.float32)
+        full_psnr = per[per["variant_key"] == "full"].sort_values("PSNR")
+        image_indices = [int(full_psnr.iloc[0]["sample_index"]), int(full_psnr.iloc[len(full_psnr) // 2]["sample_index"]), int(full_psnr.iloc[-1]["sample_index"])] if len(full_psnr) >= 3 else [0]
+        device = torch.device("cuda" if torch.cuda.is_available() and not ctx.smoke else "cpu")
+        for fraction in filtering_fractions(ctx):
+            tag = fraction_tag(fraction)
+            percent = int(round(fraction * 100.0))
+            topk = f"topk_{tag}"
+            quantile = f"quantile_{tag}"
+            random = f"random_{tag}"
+            columns = ["Clean", "Noisy input", "Full", "Top-K", "Quantile", "Random"]
+            samples = []
+            for name, image_index in zip(["hard", "median", "easy"], image_indices):
+                tensors = {
+                    "Clean": targets[image_index],
+                    "Noisy input": inputs[image_index],
+                    "Full": predict_downstream_variant(ctx, model_name, "full", inputs[image_index], device),
+                    "Top-K": predict_downstream_variant(ctx, model_name, topk, inputs[image_index], device),
+                    "Quantile": predict_downstream_variant(ctx, model_name, quantile, inputs[image_index], device),
+                    "Random": predict_downstream_variant(ctx, model_name, random, inputs[image_index], device),
+                }
+                metrics = {
+                    "Full": metric_for_sample(per, "full", image_index),
+                    "Top-K": metric_for_sample(per, topk, image_index),
+                    "Quantile": metric_for_sample(per, quantile, image_index),
+                    "Random": metric_for_sample(per, random, image_index),
+                }
+                samples.append({"name": name, "tensors": tensors, "metrics": metrics})
+            panel_path = out / f"denoiser_panel_{model_name}_{tag}.png"
+            save_denoiser_comparison_panel(samples, panel_path, columns=columns, title=f"{model_name} p{percent}")
+            written.append(panel_path)
+
+        topk_samples = []
+        for name, image_index in zip(["hard", "median", "easy"], image_indices):
+            tensors = {
+                "Clean": targets[image_index],
+                "Noisy": inputs[image_index],
+                "Full": predict_downstream_variant(ctx, model_name, "full", inputs[image_index], device),
+            }
+            metrics = {"Full": metric_for_sample(per, "full", image_index)}
+            for fraction in filtering_fractions(ctx):
+                tag = fraction_tag(fraction)
+                variant = f"topk_{tag}"
+                label = f"Top-K {int(round(fraction * 100.0))}%"
+                tensors[label] = predict_downstream_variant(ctx, model_name, variant, inputs[image_index], device)
+                metrics[label] = metric_for_sample(per, variant, image_index)
+            topk_samples.append({"name": name, "tensors": tensors, "metrics": metrics})
+        comparison_path = out / f"topk_fraction_comparison_{model_name}.png"
+        save_denoiser_comparison_panel(topk_samples, comparison_path, columns=list(topk_samples[0]["tensors"].keys()), title=f"{model_name} Top-K fraction comparison")
+        written.append(comparison_path)
+    write_json(
+        meta_path,
+        {
+            "figures_protocol_hash": figures_protocol_hash(ctx),
+            "evaluation_hashes": {
+                model_name: evaluation_protocol_hash(ctx, model_name)
+                for model_name in ["tdncnn", "drunet"]
+            },
+        },
+    )
+    ctx.write_marker(stage, start, written + [meta_path])
+
+
+def figures_protocol_hash(ctx: PipelineContext) -> str:
+    return config_hash(
+        {
+            "protocol_version": "imagenet100_figures_v1_grid_eval_outputs",
+            "tdncnn_eval": evaluation_protocol_hash(ctx, "tdncnn"),
+            "drunet_eval": evaluation_protocol_hash(ctx, "drunet"),
+        }
+    )
+
+
+def figures_artifacts_complete(ctx: PipelineContext) -> bool:
+    meta_path = ctx.stage_root("figures_grid") / "figures_meta.json"
+    if not meta_path.exists():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return str(meta.get("figures_protocol_hash", "")) == figures_protocol_hash(ctx)
 
 
 def write_combined_external_if_ready(ctx: PipelineContext) -> None:
@@ -2639,6 +3427,23 @@ def write_combined_external_if_ready(ctx: PipelineContext) -> None:
             row["Delta MSE vs model Full"] = float(row["MSE"] - full_row["MSE"])
             rows.append(row)
         pd.DataFrame(rows).to_csv(out_root / f"delta_{variant.lower().replace('-', 'k')}_vs_full.csv", index=False)
+
+
+def external_model_variant_stages(ctx: PipelineContext, model_name: str) -> list[tuple[str, str, str]]:
+    all_stages = model_variant_stages(model_name)
+    by_variant = {item[1]: item for item in all_stages}
+    if bool(ctx.cfg.get("external_benchmarks", {}).get("include_all_variants", False)):
+        return all_stages
+    requested = ctx.cfg.get("external_benchmarks", {}).get("variants")
+    if requested is None:
+        requested = ["full", "topk_p10", "topk_p20", "topk_p30"]
+    selected: list[tuple[str, str, str]] = []
+    for raw_variant in requested:
+        variant = {"topk_10": "topk_p10", "quantile_10": "quantile_p10", "random_10": "random_p10"}.get(str(raw_variant), str(raw_variant))
+        if variant not in by_variant:
+            raise ValueError(f"Unsupported external benchmark variant: {raw_variant}")
+        selected.append(by_variant[variant])
+    return selected
 
 
 def stage_external_eval_model(ctx: PipelineContext, model_name: str) -> None:
@@ -2678,9 +3483,7 @@ def stage_external_eval_model(ctx: PipelineContext, model_name: str) -> None:
         raise FileNotFoundError(f"Missing external benchmark data for {missing} under {root}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     lpips_model = create_external_lpips(device) if bool(ctx.cfg["evaluation"].get("lpips_enabled", True)) else None
-    variant_paths = {
-        label: ctx.stage_root(dstage) / "best.pt" for label, _variant, dstage in model_variant_stages(model_name)
-    }
+    variant_paths = {label: ctx.stage_root(dstage) / "best.pt" for label, _variant, dstage in external_model_variant_stages(ctx, model_name)}
     per_rows = []
     sigma = int(ctx.cfg["external_benchmarks"]["sigma"])
     seed = int(ctx.cfg["external_benchmarks"]["seed"])
@@ -2850,17 +3653,40 @@ def run_stage(ctx: PipelineContext, stage: str) -> None:
         stage_score_select(ctx)
     elif stage == "filter":
         stage_filter(ctx)
+    elif stage == "filter_grid":
+        stage_filter_grid(ctx)
+    elif stage == "downstream_early_stopping_audit":
+        stage_downstream_early_stopping_audit(ctx)
     elif stage.startswith("downstream_") or stage in VARIANT_STAGE_ALIASES:
         stage_downstream(ctx, stage)
+    elif stage == "tdncnn_grid":
+        stage_downstream_grid(ctx, "tdncnn")
+    elif stage == "drunet_grid":
+        stage_downstream_grid(ctx, "drunet")
     elif stage in {"evaluate", "tdncnn_evaluate"}:
         stage_evaluate_model(ctx, "tdncnn")
     elif stage == "drunet_evaluate":
         stage_evaluate_model(ctx, "drunet")
+    elif stage == "evaluate_grid":
+        stage_evaluate_grid(ctx)
+    elif stage == "figures_grid":
+        stage_figures_grid(ctx)
     elif stage in {"external_eval", "tdncnn_external_eval"}:
         stage_external_eval_model(ctx, "tdncnn")
     elif stage == "drunet_external_eval":
         stage_external_eval_model(ctx, "drunet")
-    elif stage == "summary":
+    elif stage == "external_grid":
+        stage_external_eval_model(ctx, "tdncnn")
+        stage_external_eval_model(ctx, "drunet")
+    elif stage in {"summary", "summary_grid"}:
+        stage_summary(ctx)
+    elif stage == "grid_all":
+        stage_downstream_early_stopping_audit(ctx)
+        stage_filter_grid(ctx)
+        stage_downstream_grid(ctx, "tdncnn")
+        stage_downstream_grid(ctx, "drunet")
+        stage_evaluate_grid(ctx)
+        stage_figures_grid(ctx)
         stage_summary(ctx)
     else:
         raise ValueError(f"Unknown stage: {stage}")
@@ -2871,7 +3697,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--experiment-root", type=Path, required=True)
-    parser.add_argument("--stage", choices=list(STAGE_DIRS), required=True)
+    parser.add_argument("--stage", choices=[*STAGE_DIRS, "internal_all"], required=True)
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--real-smoke", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -2925,6 +3751,8 @@ def make_context(args: argparse.Namespace) -> PipelineContext:
 def main() -> None:
     args = parse_args()
     ctx = make_context(args)
+    if ctx.experiment_root.exists() and not ctx.resume and not ctx.dry_run and args.stage != 'preflight':
+        raise FileExistsError('Output root exists; choose a new root or explicitly --resume an owned run.')
     validate_current_protocol("ImageNet-100", ctx.cfg, downstream_models=["tdncnn", "drunet"])
     print_protocol_summary(
         "ImageNet-100",
@@ -2935,8 +3763,12 @@ def main() -> None:
     )
     if ctx.cfg["dataset"].get("auto_download", False):
         raise RuntimeError("Dataset auto-download is disabled for ImageNet-100")
-    with stage_logging("ImageNet-100", args.stage, run_id=ctx.run_id):
-        run_stage(ctx, args.stage)
+    stages = (["prepare", "ddpm_train", "score_validate", "score_select", "filter",
+               "downstream_early_stopping_audit", "filter_grid", "tdncnn_grid", "drunet_grid",
+               "evaluate_grid", "figures_grid", "summary_grid"] if args.stage == "internal_all" else [args.stage])
+    for stage in stages:
+        with stage_logging("ImageNet-100", stage, run_id=ctx.run_id):
+            run_stage(ctx, stage)
 
 
 if __name__ == "__main__":
