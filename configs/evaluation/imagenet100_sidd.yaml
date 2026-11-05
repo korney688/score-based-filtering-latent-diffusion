@@ -11,7 +11,7 @@ sidd:
 
 source:
   imagenet_experiment_root: experiments/imagenet100_image_space_variable_awgn_v1/imagenet100_image_space_variable_awgn_001
-  imagenet_config_path: configs/experiments/imagenet100.yaml
+  imagenet_config_path: configs/experiments/imagenet100_seed42.yaml
 
 variants:
   - full

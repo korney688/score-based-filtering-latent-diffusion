@@ -117,3 +117,10 @@ requirements-dev.txt
 /docs/repository_structure.md
 /docs/public_environment.md
 /docs/reproducibility.md
+
+# Local infrastructure helpers
+/scripts/run_cifar10_noise_seed_replicates.ps1
+/scripts/run_colored_mnist_noise_seed_replicates.ps1
+/scripts/remote/imagenet100_docker.ps1
+/Dockerfile.noise-replicates
+/scripts/remote/make_noise_image_context.py

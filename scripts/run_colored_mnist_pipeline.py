@@ -9,7 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 if "--config" not in sys.argv:
-    sys.argv[1:1] = ["--config", "configs/experiments/colored_mnist_seed42_canonical.yaml"]
+    sys.argv[1:1] = ["--config", "configs/experiments/colored_mnist_seed42.yaml"]
 
 from src.mnist_pipeline import main
 

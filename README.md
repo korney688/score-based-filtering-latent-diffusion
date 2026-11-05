@@ -29,16 +29,16 @@ Production configs disable automatic downloads. `scripts/download_imagenet100_hf
 Each primary CLI requires `--run-id` and `--experiment-root`. Start with a new root and inspect the plan with `--dry-run`. Removing that flag starts the requested experiment.
 
 ```sh
-python scripts/run_colored_mnist_pipeline.py --config configs/experiments/colored_mnist_seed42_canonical.yaml --run-id colored_seed42 --experiment-root experiments/colored_mnist/colored_seed42 --stage full_grid --dry-run
-python scripts/run_cifar10_pipeline.py --config configs/experiments/cifar10.yaml --run-id cifar10_001_final_20260901 --experiment-root experiments/cifar10/cifar10_001_final_20260901 --stage internal_all --dry-run
-python scripts/run_imagenet100_pipeline.py --config configs/experiments/imagenet100.yaml --run-id imagenet100_image_space_variable_awgn_001 --experiment-root experiments/imagenet100_image_space_variable_awgn_v1/imagenet100_image_space_variable_awgn_001 --stage internal_all --dry-run
+python scripts/run_colored_mnist_pipeline.py --config configs/experiments/colored_mnist_seed42.yaml --run-id colored_seed42 --experiment-root experiments/colored_mnist/colored_seed42 --stage full_grid --dry-run
+python scripts/run_cifar10_pipeline.py --config configs/experiments/cifar10_seed42.yaml --run-id cifar10_001_final_20260901 --experiment-root experiments/cifar10/cifar10_001_final_20260901 --stage internal_all --dry-run
+python scripts/run_imagenet100_pipeline.py --config configs/experiments/imagenet100_seed42.yaml --run-id imagenet100_image_space_variable_awgn_001 --experiment-root experiments/imagenet100_image_space_variable_awgn_v1/imagenet100_image_space_variable_awgn_001 --stage internal_all --dry-run
 ```
 
 These stages cover the internal experiment. CIFAR's `all` stage also includes external evaluation; use `internal_all` for the internal grid. Resume requires matching run, source and config identity. Keep the source snapshot used for an existing run; do not edit its ownership markers.
 
 ## Corpus-noise replicates
 
-Configs under `configs/experiments/` provide corpus seeds 42/43/44. CIFAR and ImageNet use the unsuffixed YAML for seed42. Colored MNIST uses `colored_mnist_seed42_canonical.yaml`; `colored_mnist.yaml` is its driver's equality template. Other seeds, budgets and scientific parameters stay fixed.
+Configs under `configs/experiments/` provide corpus seeds 42/43/44. Each dataset uses `<dataset>_seed42.yaml` for seed42; `colored_mnist.yaml` is its driver's equality template. Other seeds, budgets and scientific parameters stay fixed.
 
 ```sh
 python scripts/run_cifar10_noise_seed_replicates.py dry-run
@@ -96,16 +96,23 @@ Build the scientific runtime from the public pinned PyTorch image:
 docker build -t research-environment:latest .
 ```
 
-This image can run the primary pipelines or the ImageNet shell driver when data and experiment directories are mounted. Provide one GPU, persistent experiment storage and suitable CPU/RAM limits; for example 12 CPUs, 64 GiB RAM and 2 GiB shared memory for full runs. Data should be mounted read-only. No data, tests or credentials enter the source-only build context.
-
-The optional remote launcher uses `Dockerfile.noise-replicates` to overlay source and a SHA256 manifest on that compatible environment. Its base can be the image built above; no private base image is required. Build the same overlay locally with:
+Use the same image for the ImageNet-100 pipeline and its corpus-noise replicates. Start a shell with data mounted read-only and persistent experiment storage. Replace the host paths and select the intended GPU:
 
 ```sh
-python scripts/remote/make_noise_image_context.py tmp/noise-context.tar
-python scripts/remote/make_noise_image_context.py --send tmp/noise-context.tar build --build-arg BASE_IMAGE=research-environment:latest -f Dockerfile.noise-replicates -t research-imagenet100:latest -
+docker run --rm -it --gpus device=0 --cpus 12 --memory 64g --shm-size 2g --mount type=bind,source=/absolute/path/to/data,target=/workspace/data,readonly --mount type=bind,source=/absolute/path/to/experiments,target=/workspace/experiments research-environment:latest bash
 ```
 
-`imagenet100_docker.ps1` is an optional Docker TLS controller. Supply `-DockerHost`, `-CaCert`, `-ClientCert`, `-ClientKey`, `-BaseImage`, `-Gpu` and `-AllowedGpus`; their environment alternatives are defined in the script. It expects caller-populated `imagenet100_data`, `imagenet100_experiments`, `imagenet100_checkpoints`, `imagenet100_outputs` and `imagenet100_logs` volumes. It protects the baseline with a read-only nested mount and uses 2 CPU/8 GiB diagnostic or 12 CPU/64 GiB training limits. The collector uses `DOCKER_HOST` and TLS certificate settings, with an optional `RESEARCH_DOCKER_IMAGE` helper image. These transport settings are separate from the scientific protocol.
+Inside the container, run the ImageNet-100 command from [Run an experiment](#run-an-experiment). Paths are relative to /workspace; data/imagenet100 is the mounted ImageFolder. Keep --dry-run to inspect the plan; remove it to produce the seed42 baseline.
+
+After the required baseline is complete, inspect and launch seed43/44 sequentially with the Linux driver:
+
+```sh
+bash scripts/remote/run_imagenet100_noise_seed_replicates.sh dry-run
+bash scripts/remote/run_imagenet100_noise_seed_replicates.sh preflight
+bash scripts/remote/run_imagenet100_noise_seed_replicates.sh run
+```
+
+The same data and experiment mounts must remain available. DATA_ROOT, OUTPUT_BASE and SEED42_ROOT can override the container defaults; baseline and replicate roots must remain distinct siblings. The launcher uses flock to prevent overlapping replicate processes. For resume, set RESUME=1 for preflight and run using the same image/source/config identity. Keep existing owner markers and checkpoints unchanged. Baseline evidence and storage requirements are listed in [Reproducibility limits](#reproducibility-limits).
 
 ## Source layout
 

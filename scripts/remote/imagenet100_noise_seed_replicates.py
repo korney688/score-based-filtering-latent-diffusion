@@ -99,7 +99,7 @@ def smoke(cfg):
 
 
 def audit(base, data, items):
-    current = runtime_cfg(pipe.read_yaml(PROJECT / "configs/experiments/imagenet100.yaml"), data)
+    current = runtime_cfg(pipe.read_yaml(PROJECT / "configs/experiments/imagenet100_seed42.yaml"), data)
     require(current["seeds"]["corpus_seed"] == 42, "Production baseline seed must be 42")
     for seed, run_id, path, root, cfg in items:
         require(differences(current, cfg) == {"seeds.corpus_seed", "provenance.allow_downstream_reuse_with_mismatched_config_hash"}, "Unexpected replicate config differences")

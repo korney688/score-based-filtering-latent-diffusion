@@ -2698,7 +2698,7 @@ def run_smoke_checks(ctx: Context) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Colored MNIST research pipeline.")
-    parser.add_argument("--config", default="configs/experiments/colored_mnist_seed42_canonical.yaml")
+    parser.add_argument("--config", default="configs/experiments/colored_mnist_seed42.yaml")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--experiment-root", required=True)
     parser.add_argument("--data-root", default=None)

@@ -51,7 +51,7 @@ def write_json(path, value):
 def layout(output=None):
     output = Path(output or PROJECT / 'experiments/cifar10').resolve()
     items = []
-    baseline = pipe.read_yaml(PROJECT / 'configs/experiments/cifar10.yaml')
+    baseline = pipe.read_yaml(PROJECT / 'configs/experiments/cifar10_seed42.yaml')
     for seed in (43, 44):
         path = PROJECT / f'configs/experiments/cifar10_seed{seed}.yaml'
         cfg = pipe.read_yaml(path)

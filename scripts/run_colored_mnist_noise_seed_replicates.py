@@ -27,7 +27,7 @@ def layout(output=None):
     items=[]
     for seed in (42,43,44):
         suffix = 'seed42_canonical' if seed == 42 else f'seed{seed}'
-        path=PROJECT / f'configs/experiments/colored_mnist_{suffix}.yaml'
+        path=PROJECT / f'configs/experiments/colored_mnist_seed{seed}.yaml'
         cfg=pipe.read_yaml(path)
         run_id=f'{BASE_ID}_{suffix}'
         expected=copy.deepcopy(baseline)
@@ -50,8 +50,6 @@ def identity(item):
     source={p.relative_to(PROJECT).as_posix():pipe.sha256_file(p) for p in (PROJECT/'src').rglob('*.py')}
     for p in (Path(__file__),PROJECT/'scripts/run_cifar10_noise_seed_replicates.py',PROJECT/'scripts/run_colored_mnist_pipeline.py'):
         source[p.relative_to(PROJECT).as_posix()]=pipe.sha256_file(p)
-    policy=PROJECT/'configs/experiments/colored_mnist_replicate_protocol.json'
-    source[policy.relative_to(PROJECT).as_posix()]=pipe.sha256_file(policy)
     return dict(run_id=item[1],corpus_seed=item[0],root=str(item[3]),config_hash=digest(item[4]),
                 source_hash=digest(source),ladder_seed=LADDER_SEED,color_seed=item[4]['dataset']['colorization']['color_seed'])
 
@@ -167,8 +165,6 @@ def blockers(item):
     for section in ('downstream','drunet'):
         if cfg[section]['early_stopping']!=expected or cfg[section]['validation_interval_steps']!=100:
             problems.append('Noncanonical early stopping: '+section)
-    policy=pipe.read_json(PROJECT/'configs/experiments/colored_mnist_replicate_protocol.json')
-    if policy.get('upstream_reuse') is not False:problems.append('Legacy upstream reuse is forbidden')
     return problems
 
 

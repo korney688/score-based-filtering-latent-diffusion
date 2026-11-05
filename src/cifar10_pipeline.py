@@ -2295,7 +2295,7 @@ def deep_get(data: dict[str, Any], dotted: str, default: Any = None) -> Any:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Canonical CIFAR-10 current image-space pipeline.")
-    parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "configs" / "experiments" / "cifar10.yaml")
+    parser.add_argument("--config", type=Path, default=PROJECT_ROOT / "configs" / "experiments" / "cifar10_seed42.yaml")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--experiment-root", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, default=None)
